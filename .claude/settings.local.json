@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /c/stream/leadharvester && venv/Scripts/pip install -r requirements.txt 2>&1)",
+      "Bash(cd /c/stream/leadharvester && venv/Scripts/python.exe -m ensurepip --upgrade 2>&1)",
+      "Bash(cd /c/stream/leadharvester && venv/Scripts/pip3.exe install -r requirements.txt 2>&1)",
+      "Bash(/c/stream/leadharvester/venv/Scripts/python.exe:*)",
+      "Bash(cd /c/stream/leadharvester && venv/Scripts/python.exe -m playwright install chromium 2>&1)",
+      "Bash(cd /c/stream/leadharvester && venv/Scripts/python.exe test_places.py 2>&1)",
+      "Bash(cd /c/stream/leadharvester && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe test_places.py 2>&1)",
+      "Bash(cd /c/stream/leadharvester && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe -c \"\nfrom scraper.places import search_businesses\nfrom scraper.website import scrape_all_websites\nfrom main import export_to_excel\n\n# Get only first 5 businesses for the test run to keep it fast\nbusinesses = search_businesses\\('Law Firms', 'Lagos'\\)\ntest_batch = businesses[:5]\n\nprint\\(f'\\\\nRunning website scrape on first 5 businesses...\\\\n'\\)\nscrape_all_websites\\(test_batch\\)\n\nfilepath = export_to_excel\\(test_batch, 'Law Firms', 'Lagos'\\)\nprint\\(f'\\\\nExport saved: {filepath}'\\)\n\nprint\\('\\\\n--- Final Results ---'\\)\nfor b in test_batch:\n    priority = 'HIGH PRIORITY' if b.is_high_priority\\(\\) else 'standard'\n    print\\(f'  {b.business_name}'\\)\n    print\\(f'    Email    : {b.email or \\\\\"N/A\\\\\"}'\\)\n    print\\(f'    Phone    : {b.phone or \\\\\"N/A\\\\\"}'\\)\n    print\\(f'    WhatsApp : {b.whatsapp or \\\\\"N/A\\\\\"}'\\)\n    print\\(f'    Instagram: {b.instagram or \\\\\"N/A\\\\\"}'\\)\n    print\\(f'    Facebook : {b.facebook or \\\\\"N/A\\\\\"}'\\)\n    print\\(f'    Score    : {b.website_quality_score}/100  [{priority}]'\\)\n    print\\(f'    Issues   : {b.website_issues}'\\)\n    print\\(\\)\n\" 2>&1)",
+      "Bash(head:*)",
+      "Bash(cd /c/stream/leadharvester && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe -c \"import pandas; print\\('pandas version:', pandas.__version__\\)\" 2>&1)",
+      "Bash(cd /c/stream/leadharvester && PYTHONIOENCODING=utf-8 venv/Scripts/python.exe -c \"\nimport pandas\nimport openpyxl\nfrom models.business import Business\nfrom main import export_to_excel\nb = Business\\(business_name='Test', category='Law Firms', city='Lagos', website_quality_score=30\\)\npath = export_to_excel\\([b], 'Law Firms', 'Lagos'\\)\nprint\\('Export OK:', path\\)\n\" 2>&1)",
+      "Bash(cd /c/stream/leadharvester && echo -e \"1\\\\nLagos\" | PYTHONIOENCODING=utf-8 venv/Scripts/python.exe main.py 2>&1)",
+      "Bash(PYTHONIOENCODING=utf-8 venv/Scripts/python.exe:*)",
+      "Bash(tail:*)",
+      "Bash(cd:*)",
+      "Bash(cd /c/stream/leadharvester && python -c \"\nimport sys\nsys.stdout = open\\(sys.stdout.fileno\\(\\), mode='w', encoding='utf-8', buffering=1\\)\nwith open\\('streamlit_app.py', encoding='utf-8'\\) as f:\n    for i, line in enumerate\\(f, 1\\):\n        for j, ch in enumerate\\(line\\):\n            if ord\\(ch\\) > 127:\n                print\\(f'Line {i}, col {j+1}: U+{ord\\(ch\\):04X} char={repr\\(ch\\)}'\\)\n\" 2>&1)",
+      "Bash(C:/stream/leadharvester/venv/Scripts/python.exe:*)",
+      "WebFetch(domain:countryhillattorneys.com.ng)",
+      "Bash(venv/Scripts/python.exe run_api.py 2>&1; echo \"EXIT: $?\")",
+      "Bash(taskkill /F /IM python.exe 2>&1)",
+      "Bash(taskkill //F //IM python.exe 2>&1)"
+    ]
+  }
+}

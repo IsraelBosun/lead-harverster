@@ -1,0 +1,5 @@
+  WARNING: Failed to remove contents in a temporary directory 'C:\stream\leadharvester\venv\Lib\site-packages\~andas'.
+  You can safely remove it manually.
+
+[notice] A new release of pip is available: 24.3.1 -> 26.0.1
+[notice] To update, run: C:\stream\leadharvester\venv\Scripts\python.exe -m pip install --upgrade pip
