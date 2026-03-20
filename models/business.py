@@ -48,6 +48,10 @@ class Business:
     website_quality_score: int = 0          # 0–100, lower = better lead
     website_issues: list = field(default_factory=list)  # e.g. ["No SSL", "No mobile"]
 
+    # --- Location / timezone ---
+    country: str = "Nigeria"
+    timezone: str = "Africa/Lagos"
+
     # --- Meta ---
     scraped_at: datetime = field(default_factory=datetime.now)
 

@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from db.database import (
+    get_available_count,
     get_campaign_stats,
     get_leads_for_campaign,
     save_campaign_send,
@@ -30,6 +31,12 @@ from db.database import (
 from emailer.sender import send_email
 from emailer.templates import render as render_template
 from main import refresh_master_excel_campaign_status, rebuild_master_excel_from_db
+from utils.timezone_utils import (
+    REGION_COUNTRIES,
+    SCRAPE_COUNTRIES,
+    get_region_work_status,
+    is_work_hours,
+)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -456,10 +463,18 @@ with tab_scrape:
                 for c in categories[half:]:
                     st.markdown(f"- {c}")
 
-        city = st.text_input(
-            "Nigerian city",
-            placeholder="e.g. Lagos, Abuja, Port Harcourt, Kano, Ibadan",
-        )
+        scrape_col1, scrape_col2 = st.columns(2)
+        with scrape_col1:
+            city = st.text_input(
+                "City",
+                placeholder="e.g. Lagos, New York, Tokyo, Mumbai",
+            )
+        with scrape_col2:
+            country = st.selectbox(
+                "Country",
+                options=["Nigeria"] + [c for c in SCRAPE_COUNTRIES if c != "Nigeria"],
+                index=0,
+            )
 
         st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
         run_clicked = st.button("Run Scrape", type="primary", use_container_width=True)
@@ -473,7 +488,11 @@ with tab_scrape:
                 st.stop()
 
             with st.spinner("Starting scrape job..."):
-                resp = _post("/scrape", {"category": category.strip(), "city": city.strip()})
+                resp = _post("/scrape", {
+                    "category": category.strip(),
+                    "city": city.strip(),
+                    "country": country,
+                })
 
             if resp is None:
                 st.error("Could not connect to the API. Is the backend running?")
@@ -773,9 +792,35 @@ with tab_campaigns:
     st.markdown('<p class="lh-section-title">Email Campaigns</p>', unsafe_allow_html=True)
     st.markdown(
         '<p class="lh-section-sub">'
-        'Send cold outreach emails to scraped leads with an email address.</p>',
+        'Send cold outreach emails to scraped leads. Emails only go to leads '
+        'currently within business hours (9am–6pm) in their timezone.</p>',
         unsafe_allow_html=True,
     )
+
+    # ── Region work-hours status cards ──────────────────────────────────────
+
+    region_statuses = get_region_work_status()
+    card_cols = st.columns(len(region_statuses))
+    for col, rs in zip(card_cols, region_statuses):
+        if rs["in_work_hours"]:
+            bg, border, label_color, status_text = "#f0fdf4", "#bbf7d0", "#15803d", "In work hours"
+        else:
+            bg, border, label_color, status_text = "#fff1f2", "#fecdd3", "#be123c", "Outside hours"
+        col.markdown(
+            f"""
+            <div style="background:{bg};border:1px solid {border};border-radius:12px;
+                        padding:0.85rem 1rem;text-align:center;">
+                <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;
+                            color:#9ca3af;letter-spacing:0.6px;">{rs['region']}</div>
+                <div style="font-size:1.1rem;font-weight:700;color:{label_color};
+                            margin:0.2rem 0;">{rs['local_time']}</div>
+                <div style="font-size:0.75rem;color:{label_color};">{status_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
 
     # ── Stats row ───────────────────────────────────────────────────────────
 
@@ -837,11 +882,26 @@ with tab_campaigns:
 
     st.markdown("**Send Campaign**")
 
-    available = stats["available_to_send"]
+    # Region filter
+    region_options = ["All"] + list(REGION_COUNTRIES.keys())
+    selected_region = st.selectbox(
+        "Target region",
+        options=region_options,
+        index=0,
+        help="Filter leads by region. Only leads currently in work hours (9am-6pm) will be sent to.",
+    )
+
+    available = get_available_count(selected_region)
     remaining_today = max(0, _EMAIL_DAILY_LIMIT - stats["sent_today"])
 
+    if selected_region != "All":
+        st.caption(f"{available} unsent leads in {selected_region} region.")
+
     if available == 0:
-        st.info("No leads available to contact. Run a scrape first to collect email addresses.")
+        st.info(
+            f"No leads available for '{selected_region}'. "
+            "Run a scrape for this region first, or choose a different region."
+        )
     elif remaining_today == 0:
         st.warning(
             f"Daily limit of {_EMAIL_DAILY_LIMIT} emails already reached for today. "
@@ -849,13 +909,17 @@ with tab_campaigns:
         )
     else:
         batch_max = min(available, remaining_today)
-        batch_size = st.slider(
-            "Emails to send in this batch",
-            min_value=1,
-            max_value=batch_max,
-            value=min(10, batch_max),
-            help=f"Daily limit: {_EMAIL_DAILY_LIMIT}. Sent today: {stats['sent_today']}. Available leads: {available}.",
-        )
+        if batch_max == 1:
+            batch_size = 1
+            st.info("1 email available to send.")
+        else:
+            batch_size = st.slider(
+                "Emails to send in this batch",
+                min_value=1,
+                max_value=batch_max,
+                value=min(10, batch_max),
+                help=f"Daily limit: {_EMAIL_DAILY_LIMIT}. Sent today: {stats['sent_today']}. Available: {available}.",
+            )
 
         send_clicked = st.button(
             f"Send to {batch_size} Lead{'s' if batch_size > 1 else ''}",
@@ -864,30 +928,45 @@ with tab_campaigns:
         )
 
         if send_clicked:
-            leads = get_leads_for_campaign(limit=batch_size)
+            leads = get_leads_for_campaign(limit=batch_size, region=selected_region)
 
             if not leads:
                 st.warning("No leads found to send to.")
             else:
-                progress_bar  = st.progress(0.0)
-                status_text   = st.empty()
-                sent = failed = 0
+                progress_bar = st.progress(0.0)
+                status_text  = st.empty()
+                sent = failed = skipped = 0
+                skipped_list: list[str] = []
+                failed_list:  list[str] = []
+                sent_list:    list[str] = []
 
                 for i, lead in enumerate(leads):
+                    label = lead["business_name"] or lead["email"]
+
+                    # Timezone check — skip if outside business hours
+                    if not is_work_hours(lead["timezone"]):
+                        skipped += 1
+                        skipped_list.append(
+                            f"{label} ({lead['country']} — currently outside 9am-6pm)"
+                        )
+                        progress_bar.progress((i + 1) / len(leads))
+                        status_text.text(f"Checking {i + 1} of {len(leads)}: {label}")
+                        continue
+
+                    status_text.text(f"Sending {i + 1} of {len(leads)}: {label}")
                     subject, body = render_template(lead["business_name"])
                     ok, _ = send_email(lead["email"], subject, body)
 
                     if ok:
                         save_campaign_send(lead["email"], lead["business_name"], "sent")
                         sent += 1
+                        sent_list.append(label)
                     else:
                         save_campaign_send(lead["email"], lead["business_name"], "failed")
                         failed += 1
+                        failed_list.append(label)
 
                     progress_bar.progress((i + 1) / len(leads))
-                    status_text.text(
-                        f"Sending {i + 1} of {len(leads)}: {lead['business_name'] or lead['email']}"
-                    )
 
                     if i < len(leads) - 1:
                         time.sleep(_EMAIL_DELAY)
@@ -896,10 +975,29 @@ with tab_campaigns:
                 progress_bar.progress(1.0)
                 refresh_master_excel_campaign_status()
 
-                if sent:
-                    st.success(f"Campaign complete. Sent: {sent} | Failed: {failed}")
-                else:
-                    st.error(f"All {failed} sends failed. Check your SMTP settings in `.env`.")
+                # ── Results summary ──────────────────────────────────────
+                r1, r2, r3 = st.columns(3)
+                r1.metric("Sent", sent)
+                r2.metric("Skipped (out of hours)", skipped)
+                r3.metric("Failed", failed)
+
+                if sent_list:
+                    with st.expander(f"Sent ({len(sent_list)})"):
+                        for name in sent_list:
+                            st.markdown(f"- {name}")
+
+                if skipped_list:
+                    with st.expander(f"Skipped — outside work hours ({len(skipped_list)}) — will retry next send"):
+                        for name in skipped_list:
+                            st.markdown(f"- {name}")
+
+                if failed_list:
+                    with st.expander(f"Failed ({len(failed_list)})"):
+                        for name in failed_list:
+                            st.markdown(f"- {name}")
+
+                if sent == 0 and skipped == 0:
+                    st.error("All sends failed. Check your SMTP settings in `.env`.")
 
                 st.rerun()
 

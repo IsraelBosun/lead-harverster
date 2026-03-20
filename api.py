@@ -56,6 +56,7 @@ class ScrapeRequest(BaseModel):
     """Request body for POST /scrape."""
     category: str
     city: str
+    country: str = "Nigeria"
 
 
 # ── In-memory job store ────────────────────────────────────────────────────────
@@ -77,7 +78,7 @@ jobs: dict[str, dict] = {}
 
 # ── Background scrape task ─────────────────────────────────────────────────────
 
-async def _run_scrape_job(job_id: str, category: str, city: str) -> None:
+async def _run_scrape_job(job_id: str, category: str, city: str, country: str = "Nigeria") -> None:
     """
     Full scrape pipeline for one job, runs in the background.
 
@@ -97,7 +98,7 @@ async def _run_scrape_job(job_id: str, category: str, city: str) -> None:
 
         known_urls: set[str] = await asyncio.to_thread(get_existing_website_urls)
         businesses: list[Business] = await asyncio.to_thread(
-            search_businesses, category, city, known_urls
+            search_businesses, category, city, known_urls, country
         )
 
         if not businesses:
@@ -238,6 +239,7 @@ async def start_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks
     """
     category = payload.category.strip()
     city = payload.city.strip()
+    country = payload.country.strip() or "Nigeria"
 
     # Validate category — freeform input is allowed; presets get mapped to
     # optimised keywords inside search_businesses(), anything else is used as-is
@@ -270,7 +272,7 @@ async def start_scrape(payload: ScrapeRequest, background_tasks: BackgroundTasks
     }
 
     # Kick off the background scrape
-    background_tasks.add_task(_run_scrape_job, job_id, category, city)
+    background_tasks.add_task(_run_scrape_job, job_id, category, city, country)
 
     logger.info("Job %s created | category=%s | city=%s", job_id, category, city)
 

@@ -5,21 +5,22 @@ Plain-text cold outreach template for law firms.
 Single universal template used for all leads regardless of website quality.
 """
 
-SUBJECT = "Is {business_name} losing clients after hours?"
+SUBJECT = "Custom Software Solutions for {business_name}"
 
 BODY = """\
 Dear {business_name} Team,
 
-When a potential client visits your website at 9pm or during a hearing, is anyone available to answer their questions and take their details?
+My name is Bosun. I build custom software for law firms, including client intake systems, case management tools, document automation, internal dashboards, and mobile apps.
 
-Most law firms lose those enquiries. The client moves on to the next firm on Google.
+I came across {business_name} online and wanted to introduce myself.
 
-I have built a smart intake assistant that handles this automatically on your website. It engages visitors, finds out what they need, collects their contact details, and notifies you immediately. No manual effort on your end.
+Many law firms have internal processes that are repetitive, slow, or still handled manually. That is where I am able to help, by building practical tools that fit the way the firm already works.
 
-I would welcome the opportunity to show you a brief demo at your convenience.
+I am not pitching a specific product. Should your firm require any software services, please reply to this email and we can arrange a time to speak.
 
 Yours sincerely,
 Bosun
+CEO
 Blue Hydra Labs\
 """
 

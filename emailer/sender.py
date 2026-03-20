@@ -89,8 +89,8 @@ from utils.logger import get_logger
 load_dotenv()
 logger = get_logger(__name__)
 
-SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.privateemail.com")
-SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_HOST     = os.getenv("SMTP_HOST", "mail.privateemail.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER     = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SENDER_NAME   = os.getenv("SENDER_NAME", "Bosun")
@@ -115,20 +115,19 @@ def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
     # Debug: confirm env vars loaded correctly
     logger.info("SMTP config -> host=%s, port=%s, user=%s", SMTP_HOST, SMTP_PORT, SMTP_USER)
 
+    SENDER_EMAIL = os.getenv("SENDER_EMAIL", "bosun@bluehydralabs.com")
+
     mime = MIMEMultipart()
-    mime["From"]    = SMTP_USER                  # plain address, matches DKIM
+    mime["From"]    = f"{SENDER_NAME} <{SENDER_EMAIL}>"
     mime["To"]      = to_address
-    mime["Bcc"]     = SMTP_USER
+    mime["Bcc"]     = SENDER_EMAIL
     mime["Subject"] = subject
     mime.attach(MIMEText(body, "plain", "utf-8"))
 
     try:
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
+        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)
         server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, [to_address, SMTP_USER], mime.as_string())
+        server.sendmail(SENDER_EMAIL, [to_address, SENDER_EMAIL], mime.as_string())
         logger.info("Email sent OK -> %s", to_address)
         return True, ""
 

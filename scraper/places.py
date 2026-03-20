@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from models.business import Business
 from utils.helpers import normalise_url_for_dedup
 from utils.logger import get_logger
+from utils.timezone_utils import get_timezone
 
 load_dotenv()
 
@@ -98,14 +99,15 @@ def _get_place_details(client: httpx.Client, place_id: str) -> dict:
         return {}
 
 
-def _parse_place(raw: dict, category: str, city: str) -> Business:
+def _parse_place(raw: dict, category: str, city: str, country: str = "Nigeria") -> Business:
     """
     Converts a raw Google Places result dict into a Business object.
 
     Args:
-        raw: Single result dict from the API response.
+        raw:      Single result dict from the API response.
         category: Human-readable category label (e.g. "Law Firms").
-        city: City the search was run for.
+        city:     City the search was run for.
+        country:  Country the search was run for (used for timezone tagging).
 
     Returns:
         Partially populated Business (no website scraping yet).
@@ -114,6 +116,8 @@ def _parse_place(raw: dict, category: str, city: str) -> Business:
         business_name=raw.get("name", ""),
         category=category,
         city=city,
+        country=country,
+        timezone=get_timezone(country),
         address=raw.get("formatted_address", raw.get("vicinity", "")),
         phone=raw.get("formatted_phone_number", raw.get("phone", "")),
         website_url=raw.get("website", ""),
@@ -128,6 +132,7 @@ def search_businesses(
     category: str,
     city: str,
     known_urls: set[str] | None = None,
+    country: str = "Nigeria",
 ) -> list[Business]:
     """
     Searches Google Places for businesses matching the given category and city.
@@ -160,7 +165,7 @@ def search_businesses(
     known_urls = known_urls or set()
 
     keyword = CATEGORY_MAP.get(category, category.strip())
-    query = f"{keyword} in {city}, Nigeria"
+    query = f"{keyword} in {city}, {country}"
 
     print(f"\n[SEARCH] Searching Google Places for: \"{query}\"")
     if known_urls:
@@ -223,7 +228,7 @@ def search_businesses(
                 if len(businesses) >= MAX_RESULTS:
                     break
 
-                business = _parse_place(raw, category, city)
+                business = _parse_place(raw, category, city, country)
 
                 # If no website from Text Search, call Place Details to get one
                 if not business.website_url and business.place_id:

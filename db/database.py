@@ -56,9 +56,19 @@ def init_db() -> None:
                 google_rating          REAL,
                 website_quality_score  INTEGER,
                 email_source           TEXT,
-                scraped_at             TEXT
+                scraped_at             TEXT,
+                country                TEXT DEFAULT 'Nigeria',
+                timezone               TEXT DEFAULT 'Africa/Lagos'
             )
         """)
+        # Migrate existing DBs that don't have the new columns yet
+        for col, default in [("country", "Nigeria"), ("timezone", "Africa/Lagos")]:
+            try:
+                conn.execute(
+                    f"ALTER TABLE businesses ADD COLUMN {col} TEXT DEFAULT '{default}'"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS campaigns (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -249,8 +259,8 @@ def save_businesses(businesses: list["Business"]) -> int:
                 INSERT OR IGNORE INTO businesses
                     (email, place_id, business_name, category, city, phone, whatsapp,
                      website_url, instagram, facebook, twitter, google_rating,
-                     website_quality_score, email_source, scraped_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     website_quality_score, email_source, scraped_at, country, timezone)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     email_lower,
@@ -268,6 +278,8 @@ def save_businesses(businesses: list["Business"]) -> int:
                     b.website_quality_score,
                     b.email_source,
                     b.scraped_at.isoformat(),
+                    b.country,
+                    b.timezone,
                 ),
             )
 
@@ -314,31 +326,90 @@ def get_today_sent_count() -> int:
     return row[0] if row else 0
 
 
-def get_leads_for_campaign(limit: int = 50) -> list[dict]:
+def get_leads_for_campaign(limit: int = 50, region: str = "All") -> list[dict]:
     """
     Returns leads from the businesses table that:
       - have an email address
       - have NOT been successfully contacted yet (no row in campaigns with status='sent')
+      - optionally filtered by region (matches country against REGION_COUNTRIES)
 
-    Returns a list of dicts with keys: email, business_name
+    Returns a list of dicts with keys: email, business_name, country, timezone
     """
+    from utils.timezone_utils import REGION_COUNTRIES
+
     init_db()
+
+    region_clause = ""
+    params: list = []
+
+    if region and region != "All":
+        countries = REGION_COUNTRIES.get(region, [])
+        if countries:
+            placeholders = ",".join("?" * len(countries))
+            region_clause = f"AND b.country IN ({placeholders})"
+            params.extend(countries)
+
+    params.append(limit)
+
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            """
-            SELECT b.email, b.business_name
+            f"""
+            SELECT b.email, b.business_name, b.country, b.timezone
             FROM businesses b
             WHERE b.email IS NOT NULL
               AND b.email != ''
               AND b.email NOT IN (
                   SELECT email FROM campaigns WHERE status = 'sent'
               )
+              {region_clause}
             ORDER BY b.scraped_at DESC
             LIMIT ?
             """,
-            (limit,),
+            params,
         ).fetchall()
-    return [{"email": r[0], "business_name": r[1] or ""} for r in rows]
+
+    return [
+        {
+            "email":         r[0],
+            "business_name": r[1] or "",
+            "country":       r[2] or "Nigeria",
+            "timezone":      r[3] or "Africa/Lagos",
+        }
+        for r in rows
+    ]
+
+
+def get_available_count(region: str = "All") -> int:
+    """
+    Returns the count of unsent leads (with email) optionally filtered by region.
+    More efficient than fetching all leads just to count them.
+    """
+    from utils.timezone_utils import REGION_COUNTRIES
+
+    init_db()
+
+    region_clause = ""
+    params: list = []
+
+    if region and region != "All":
+        countries = REGION_COUNTRIES.get(region, [])
+        if countries:
+            placeholders = ",".join("?" * len(countries))
+            region_clause = f"AND b.country IN ({placeholders})"
+            params.extend(countries)
+
+    with sqlite3.connect(DB_PATH) as conn:
+        count = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM businesses b
+            WHERE b.email IS NOT NULL AND b.email != ''
+              AND b.email NOT IN (SELECT email FROM campaigns WHERE status = 'sent')
+              {region_clause}
+            """,
+            params,
+        ).fetchone()[0]
+
+    return count
 
 
 def get_campaign_status_map() -> dict[str, str]:
