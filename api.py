@@ -22,7 +22,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from db.database import filter_new_businesses, get_existing_website_urls, save_businesses
@@ -365,3 +365,31 @@ async def download_export(job_id: str):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename=filename,
     )
+
+
+# ── Email open tracking ────────────────────────────────────────────────────────
+
+# 1x1 transparent GIF — returned for every tracking pixel request
+_PIXEL = bytes([
+    0x47,0x49,0x46,0x38,0x39,0x61,0x01,0x00,0x01,0x00,0x80,0x00,0x00,
+    0xFF,0xFF,0xFF,0x00,0x00,0x00,0x21,0xF9,0x04,0x00,0x00,0x00,0x00,
+    0x00,0x2C,0x00,0x00,0x00,0x00,0x01,0x00,0x01,0x00,0x00,0x02,0x02,
+    0x44,0x01,0x00,0x3B,
+])
+
+
+@app.get("/track/open/{lead_id}")
+async def track_open(lead_id: str):
+    """
+    Called when a recipient opens an email containing the tracking pixel.
+    Logs the open timestamp to the campaigns table, then returns a 1x1
+    transparent GIF so the email client doesn't show a broken image.
+    """
+    from urllib.parse import unquote
+    from db.database import log_email_open
+
+    email = unquote(lead_id)
+    await asyncio.to_thread(log_email_open, email)
+    logger.info("Email opened by %s", email)
+
+    return Response(content=_PIXEL, media_type="image/gif")

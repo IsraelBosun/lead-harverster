@@ -81,6 +81,7 @@ import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -89,11 +90,12 @@ from utils.logger import get_logger
 load_dotenv()
 logger = get_logger(__name__)
 
-SMTP_HOST     = os.getenv("SMTP_HOST", "mail.privateemail.com")
-SMTP_PORT     = int(os.getenv("SMTP_PORT", "465"))
-SMTP_USER     = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SENDER_NAME   = os.getenv("SENDER_NAME", "Bosun")
+SMTP_HOST         = os.getenv("SMTP_HOST", "mail.privateemail.com")
+SMTP_PORT         = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER         = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD     = os.getenv("SMTP_PASSWORD", "")
+SENDER_NAME       = os.getenv("SENDER_NAME", "Bosun")
+TRACKING_BASE_URL = os.getenv("TRACKING_BASE_URL", "")
 
 
 def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
@@ -117,12 +119,26 @@ def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
 
     SENDER_EMAIL = os.getenv("SENDER_EMAIL", "bosun@bluehydralabs.com")
 
-    mime = MIMEMultipart()
+    mime = MIMEMultipart("alternative")
     mime["From"]    = f"{SENDER_NAME} <{SENDER_EMAIL}>"
     mime["To"]      = to_address
     mime["Bcc"]     = SENDER_EMAIL
     mime["Subject"] = subject
+
+    # Plain text part (always included)
     mime.attach(MIMEText(body, "plain", "utf-8"))
+
+    # HTML part with tracking pixel (if tracking URL is configured)
+    if TRACKING_BASE_URL:
+        encoded_email = quote(to_address, safe="")
+        pixel_url = f"{TRACKING_BASE_URL}/track/open/{encoded_email}"
+        html_body = (
+            "<html><body>"
+            f"<pre style='font-family:Arial,sans-serif;font-size:14px;white-space:pre-wrap'>{body}</pre>"
+            f"<img src='{pixel_url}' width='1' height='1' style='display:none' alt=''/>"
+            "</body></html>"
+        )
+        mime.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)

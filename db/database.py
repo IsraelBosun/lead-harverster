@@ -75,9 +75,15 @@ def init_db() -> None:
                 email         TEXT NOT NULL,
                 business_name TEXT,
                 sent_at       TEXT,
-                status        TEXT
+                status        TEXT,
+                opened_at     TEXT
             )
         """)
+        # Migrate existing campaigns table
+        try:
+            conn.execute("ALTER TABLE campaigns ADD COLUMN opened_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.commit()
 
     logger.debug("DB initialised at %s", DB_PATH)
@@ -313,6 +319,31 @@ def save_campaign_send(email: str, business_name: str, status: str) -> None:
         conn.commit()
 
 
+def log_email_open(email: str) -> None:
+    """
+    Records the first time an email was opened by updating opened_at
+    on the most recent sent campaign row for that address.
+    Only sets opened_at once — subsequent opens are ignored.
+    """
+    init_db()
+    from datetime import datetime
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE campaigns
+            SET opened_at = ?
+            WHERE id = (
+                SELECT id FROM campaigns
+                WHERE email = ? AND status = 'sent' AND opened_at IS NULL
+                ORDER BY sent_at DESC
+                LIMIT 1
+            )
+            """,
+            (datetime.now().isoformat(), email.lower()),
+        )
+        conn.commit()
+
+
 def get_today_sent_count() -> int:
     """Returns how many emails were successfully sent today."""
     init_db()
@@ -449,10 +480,15 @@ def get_campaign_stats() -> dict:
             (f"{today}%",),
         ).fetchone()[0]
 
+        total_opens = conn.execute(
+            "SELECT COUNT(DISTINCT email) FROM campaigns WHERE opened_at IS NOT NULL"
+        ).fetchone()[0]
+
     available = max(0, total_with_email - already_contacted)
     return {
         "total_with_email":  total_with_email,
         "already_contacted": already_contacted,
         "available_to_send": available,
         "sent_today":        sent_today,
+        "total_opens":       total_opens,
     }

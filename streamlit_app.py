@@ -825,11 +825,12 @@ with tab_campaigns:
     # ── Stats row ───────────────────────────────────────────────────────────
 
     stats = get_campaign_stats()
-    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
     sc1.metric("Total with Email",  stats["total_with_email"])
     sc2.metric("Already Contacted", stats["already_contacted"])
     sc3.metric("Available to Send", stats["available_to_send"])
     sc4.metric("Sent Today",        stats["sent_today"])
+    sc5.metric("Emails Opened",     stats.get("total_opens", 0))
 
     st.divider()
 
