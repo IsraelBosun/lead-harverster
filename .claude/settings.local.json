@@ -21,7 +21,26 @@
       "WebFetch(domain:countryhillattorneys.com.ng)",
       "Bash(venv/Scripts/python.exe run_api.py 2>&1; echo \"EXIT: $?\")",
       "Bash(taskkill /F /IM python.exe 2>&1)",
-      "Bash(taskkill //F //IM python.exe 2>&1)"
+      "Bash(taskkill //F //IM python.exe 2>&1)",
+      "Bash(wc:*)",
+      "Bash(venv/Scripts/python.exe -c \"import dns.resolver; print\\(''dnspython ok''\\)\")",
+      "Bash(venv/Scripts/pip3.exe install:*)",
+      "Bash(venv/Scripts/python.exe -c \":*)",
+      "Bash(venv/Scripts/python.exe -c \"import dns.resolver; print\\(''dns ok''\\)\")",
+      "Bash(venv/Scripts/python.exe -m enricher.enricher)",
+      "Bash(venv/Scripts/python.exe -c \")",
+      "Bash(venv/Scripts/python.exe -c \"import google.generativeai; print\\(''installed ok''\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"import google.genai; print\\(''google-genai ok''\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"\nfrom db.database import get_db_connection\nconn = get_db_connection\\(\\)\nconn.execute\\('DELETE FROM contacts'\\)\nconn.execute\\('UPDATE businesses SET enriched_at = NULL'\\)\nconn.commit\\(\\)\nrows = conn.execute\\('SELECT COUNT\\(*\\) FROM contacts'\\).fetchone\\(\\)[0]\nenriched = conn.execute\\('SELECT COUNT\\(*\\) FROM businesses WHERE enriched_at IS NOT NULL'\\).fetchone\\(\\)[0]\nconn.close\\(\\)\nprint\\('Contacts remaining:', rows\\)\nprint\\('Businesses marked enriched:', enriched\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DELETE FROM contacts'\\)\nconn.execute\\('UPDATE businesses SET enriched_at = NULL'\\)\nconn.commit\\(\\)\ncontacts = conn.execute\\('SELECT COUNT\\(*\\) FROM contacts'\\).fetchone\\(\\)[0]\nenriched = conn.execute\\('SELECT COUNT\\(*\\) FROM businesses WHERE enriched_at IS NOT NULL'\\).fetchone\\(\\)[0]\nconn.close\\(\\)\nprint\\('Contacts remaining:', contacts\\)\nprint\\('Businesses marked enriched:', enriched\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DELETE FROM contacts'\\)\nconn.execute\\('UPDATE businesses SET enriched_at = NULL'\\)\nconn.commit\\(\\)\nprint\\('Contacts remaining:', conn.execute\\('SELECT COUNT\\(*\\) FROM contacts'\\).fetchone\\(\\)[0]\\)\nprint\\('Businesses marked enriched:', conn.execute\\('SELECT COUNT\\(*\\) FROM businesses WHERE enriched_at IS NOT NULL'\\).fetchone\\(\\)[0]\\)\nconn.close\\(\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DELETE FROM drafts'\\)\nconn.commit\\(\\)\nprint\\('Drafts remaining:', conn.execute\\('SELECT COUNT\\(*\\) FROM drafts'\\).fetchone\\(\\)[0]\\)\nconn.close\\(\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DELETE FROM drafts'\\)\nconn.commit\\(\\)\nprint\\('Drafts cleared:', conn.execute\\('SELECT COUNT\\(*\\) FROM drafts'\\).fetchone\\(\\)[0]\\)\nconn.close\\(\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DELETE FROM drafts'\\)\nconn.commit\\(\\)\nprint\\('Drafts cleared:', conn.execute\\('SELECT COUNT\\(*\\) FROM drafts'\\).fetchone\\(\\)[0]\\)\nconn.close\\(\\)\n\"\ni have sent 10 mails do not delete the status of this in the db cos i do not want to send multiple mails to the same people)",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nprint\\('Draft statuses:'\\)\nfor row in conn.execute\\('SELECT status, COUNT\\(*\\) FROM drafts GROUP BY status'\\).fetchall\\(\\):\n    print\\(' ', row[0], ':', row[1]\\)\nprint\\('Campaigns sent:'\\)\nprint\\(' ', conn.execute\\(\\\\\"SELECT COUNT\\(*\\) FROM campaigns WHERE status='sent'\\\\\"\\).fetchone\\(\\)[0]\\)\nconn.close\\(\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nrows = conn.execute\\('SELECT id, person_name, candidate_email, status FROM drafts'\\).fetchall\\(\\)\nfor r in rows:\n    print\\(r\\)\nconn.close\\(\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DROP TABLE IF EXISTS drafts'\\)\nconn.commit\\(\\)\nconn.close\\(\\)\nprint\\('Drafts table dropped — will be recreated fresh on next run.'\\)\n\")",
+      "Bash(venv/Scripts/python.exe -c \"\nimport sqlite3\nconn = sqlite3.connect\\('output/leadharvest.db'\\)\nconn.execute\\('DROP TABLE IF EXISTS drafts'\\)\nconn.commit\\(\\)\nconn.close\\(\\)\nprint\\('Done'\\)\n\")"
     ]
   }
 }

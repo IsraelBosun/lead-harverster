@@ -25,8 +25,17 @@ load_dotenv()
 from db.database import (
     get_available_count,
     get_campaign_stats,
+    get_contact_stats,
+    get_all_contacts,
+    get_enrichment_status,
     get_leads_for_campaign,
+    get_opened_leads,
     save_campaign_send,
+    get_all_drafts,
+    get_draft_stats,
+    mark_draft_sent,
+    delete_draft,
+    get_campaign_status_map,
 )
 from emailer.sender import send_email
 from emailer.templates import render as render_template
@@ -41,6 +50,7 @@ from utils.timezone_utils import (
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 API_BASE = "http://127.0.0.1:8000"
+# API_BASE = "https://lead-harverster-api.onrender.com"
 POLL_INTERVAL_SECONDS = 3
 
 
@@ -409,7 +419,7 @@ st.markdown("""
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_scrape, tab_campaigns = st.tabs(["Scrape", "Campaigns"])
+tab_scrape, tab_campaigns, tab_dm = st.tabs(["Scrape", "Campaigns", "Decision Makers"])
 
 
 
@@ -857,10 +867,11 @@ with tab_campaigns:
         if not test_addr.strip() or "@" not in test_addr:
             st.warning("Enter a valid email address to test.")
         else:
-            subject, body = render_template("Sample Law Firm")
+            subject, body = render_template("Bluehydra Labs")
             with st.spinner(f"Sending test email to {test_addr}..."):
                 ok, reason = send_email(test_addr.strip(), subject, body)
             if ok:
+                save_campaign_send(test_addr.strip(), "Bluehydra Labs", "sent")
                 st.success(f"Test email sent to {test_addr}. Check your inbox (and spam folder).")
             else:
                 st.error(f"Send failed: {reason}")
@@ -873,7 +884,7 @@ with tab_campaigns:
     # ── Email preview ───────────────────────────────────────────────────────
 
     with st.expander("Preview email template"):
-        prev_subject, prev_body = render_template("Sample Law Firm")
+        prev_subject, prev_body = render_template("Bluehydra Labs")
         st.markdown(f"**Subject:** {prev_subject}")
         st.text(prev_body)
 
@@ -1004,6 +1015,20 @@ with tab_campaigns:
 
     st.divider()
 
+    # ── Who opened ──────────────────────────────────────────────────────────
+
+    st.markdown("**Who Opened Your Emails**")
+    opened = get_opened_leads()
+    if not opened:
+        st.info("No opens tracked yet. Opens will appear here once recipients view your emails.")
+    else:
+        import pandas as pd
+        df_opens = pd.DataFrame(opened)
+        df_opens.columns = ["Email", "Business Name", "Sent At", "Opened At"]
+        st.dataframe(df_opens, use_container_width=True, hide_index=True)
+
+    st.divider()
+
     # ── Rebuild master Excel ─────────────────────────────────────────────────
 
     st.markdown("**Rebuild Master Excel from Database**")
@@ -1012,3 +1037,313 @@ with tab_campaigns:
         with st.spinner("Rebuilding master Excel from database..."):
             path = rebuild_master_excel_from_db()
         st.success(f"Master Excel rebuilt — {path}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Decision Makers
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_dm:
+
+    st.markdown('<p class="lh-section-title">Decision Makers</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="lh-section-sub">'
+        'Find CEOs, MDs, Founders and other key contacts from business team pages. '
+        'Candidate emails are generated from name patterns and saved for outreach.</p>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Stats row ───────────────────────────────────────────────────────────
+
+    dm_stats = get_contact_stats()
+    ds1, ds2, ds3 = st.columns(3)
+    ds1.metric("Businesses Enriched", dm_stats["businesses_enriched"])
+    ds2.metric("Contacts Found",      dm_stats["total_contacts"])
+    ds3.metric("Pending",             340 - dm_stats["businesses_enriched"])
+
+    st.divider()
+
+    # ── Enrichment controls ─────────────────────────────────────────────────
+
+    st.markdown("**Run Enrichment**")
+    st.caption(
+        "Visits team/about pages of Nigerian businesses in your DB, extracts "
+        "decision-maker names and titles, and generates candidate emails. "
+        "Only processes businesses not yet enriched. Sites that time out are "
+        "skipped and retried on the next run."
+    )
+
+    enrich_col1, enrich_col2 = st.columns([2, 1])
+    with enrich_col1:
+        enrich_limit = st.number_input(
+            "Number of businesses to enrich",
+            min_value=1, max_value=340, value=10, step=10,
+            help="Each business takes 15-60 seconds depending on site speed.",
+        )
+    with enrich_col2:
+        st.markdown("<div style='height: 1.85rem'></div>", unsafe_allow_html=True)
+        enrich_clicked = st.button("Run Enrichment", type="primary", use_container_width=True)
+
+    if enrich_clicked:
+        from enricher.enricher import enrich_businesses
+
+        with st.spinner(f"Enriching up to {enrich_limit} businesses... this may take several minutes."):
+            result = enrich_businesses(limit=int(enrich_limit))
+
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric("Processed",    result["businesses_processed"])
+        ec2.metric("People Found", result["people_found"])
+        ec3.metric("Contacts Saved", result["saved"])
+
+        if result["people_found"] == 0:
+            st.info(
+                "No decision-maker profiles found on these sites. "
+                "Many small Nigerian SMB sites don't have a team page. "
+                "Try running again to process more businesses."
+            )
+        elif result["saved"] > 0:
+            st.success(f"{result['saved']} new decision-maker contacts saved.")
+
+        st.rerun()
+
+    st.divider()
+
+    # ── Enrichment status table ─────────────────────────────────────────────
+
+    st.markdown("**Enrichment Status**")
+    st.caption("Shows the last 100 Nigerian businesses and their enrichment state.")
+
+    enrich_status = get_enrichment_status(limit=100)
+
+    if enrich_status:
+        STATUS_COLS = ["business_name", "status", "contacts_found", "enriched_at", "website_url"]
+        status_rows = [{col: r.get(col, "") for col in STATUS_COLS} for r in enrich_status]
+        st.dataframe(
+            status_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "business_name":  st.column_config.TextColumn("Business",      width="large"),
+                "status":         st.column_config.TextColumn("Status",        width="small"),
+                "contacts_found": st.column_config.NumberColumn("Contacts",    width="small"),
+                "enriched_at":    st.column_config.TextColumn("Enriched At",   width="medium"),
+                "website_url":    st.column_config.LinkColumn("Website", display_text="Visit"),
+            },
+        )
+
+    st.divider()
+
+    # ── Contacts table ──────────────────────────────────────────────────────
+
+    contacts = get_all_contacts()
+
+    st.markdown(
+        f'<p class="lh-section-title">'
+        f'Contacts &nbsp;<span style="font-weight:400; color:#9ca3af;">'
+        f'{len(contacts)} total</span></p>',
+        unsafe_allow_html=True,
+    )
+
+    if not contacts:
+        st.info("No contacts yet. Run enrichment above to find decision-makers.")
+    else:
+        st.markdown('<div class="lh-filter-row">', unsafe_allow_html=True)
+        fc1, fc2 = st.columns([1, 3])
+        with fc1:
+            dm_status_filter = st.selectbox(
+                "Status",
+                options=["All", "unverified", "verified", "catch_all"],
+                label_visibility="collapsed",
+            )
+        with fc2:
+            dm_name_filter = st.text_input(
+                "search",
+                placeholder="Filter by name or business...",
+                label_visibility="collapsed",
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        filtered_contacts = contacts
+        if dm_status_filter != "All":
+            filtered_contacts = [c for c in filtered_contacts if c["smtp_status"] == dm_status_filter]
+        if dm_name_filter.strip():
+            term = dm_name_filter.strip().lower()
+            filtered_contacts = [
+                c for c in filtered_contacts
+                if term in (c.get("person_name") or "").lower()
+                or term in (c.get("business_name") or "").lower()
+            ]
+
+        st.caption(f"Showing **{len(filtered_contacts)}** of **{len(contacts)}** contacts")
+
+        if filtered_contacts:
+            DM_COLS = ["person_name", "title", "candidate_email",
+                       "business_name", "pattern_used", "source_page_url"]
+            display_rows = [{col: c.get(col, "") for col in DM_COLS} for c in filtered_contacts]
+
+            st.dataframe(
+                display_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "person_name":     st.column_config.TextColumn("Name",        width="medium"),
+                    "title":           st.column_config.TextColumn("Title",       width="medium"),
+                    "candidate_email": st.column_config.TextColumn("Email",       width="large"),
+                    "business_name":   st.column_config.TextColumn("Business",    width="medium"),
+                    "pattern_used":    st.column_config.TextColumn("Pattern",     width="small"),
+                    "source_page_url": st.column_config.LinkColumn("Source Page", display_text="View page"),
+                },
+            )
+        else:
+            st.info("No contacts match the current filters.")
+
+    st.divider()
+
+    # ── Drafts ──────────────────────────────────────────────────────────────
+
+    draft_stats = get_draft_stats()
+    st.markdown(
+        f'<p class="lh-section-title">'
+        f'Email Drafts &nbsp;<span style="font-weight:400; color:#9ca3af;">'
+        f'{draft_stats["total"]} total</span></p>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p class="lh-section-sub">'
+        'Gemini writes a personalised cold email for each contact based on their '
+        'role and what their company website says. Review drafts here before sending.</p>',
+        unsafe_allow_html=True,
+    )
+
+    dr1, dr2, dr3 = st.columns(3)
+    dr1.metric("Total Drafts",   draft_stats["total"])
+    dr2.metric("Pending Send",   draft_stats["pending"])
+    dr3.metric("Emails Sent",    draft_stats["emails_sent"])
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    draft_col1, draft_col2 = st.columns([2, 1])
+    with draft_col1:
+        draft_limit = st.number_input(
+            "Number of contacts to draft for",
+            min_value=1, max_value=500, value=20, step=10,
+            help="Gemini writes one email per contact. Each takes ~2 seconds.",
+            key="draft_limit",
+        )
+    with draft_col2:
+        st.markdown("<div style='height: 1.85rem'></div>", unsafe_allow_html=True)
+        draft_clicked = st.button("Generate Drafts", type="primary", use_container_width=True)
+
+    if draft_clicked:
+        from enricher.drafter import generate_drafts
+        with st.spinner(f"Generating up to {draft_limit} email drafts with Gemini..."):
+            dresult = generate_drafts(limit=int(draft_limit))
+        dc1, dc2, dc3 = st.columns(3)
+        dc1.metric("Contacts Processed", dresult["contacts_processed"])
+        dc2.metric("Drafts Saved",       dresult["drafts_saved"])
+        dc3.metric("Skipped",            dresult["skipped"])
+        if dresult["drafts_saved"] > 0:
+            st.success(f"{dresult['drafts_saved']} drafts ready to review below.")
+        st.rerun()
+
+    st.divider()
+
+    # ── Draft review table ───────────────────────────────────────────────────
+
+    all_drafts = get_all_drafts()
+
+    if not all_drafts:
+        st.info("No drafts yet. Click 'Generate Drafts' above.")
+    else:
+        drf1, drf2 = st.columns([1, 3])
+        with drf1:
+            draft_status_filter = st.selectbox(
+                "Draft status",
+                options=["All", "pending", "sent"],
+                label_visibility="collapsed",
+                key="draft_status_filter",
+            )
+        with drf2:
+            draft_search = st.text_input(
+                "search drafts",
+                placeholder="Filter by name or business...",
+                label_visibility="collapsed",
+                key="draft_search",
+            )
+
+        filtered_drafts = all_drafts
+        if draft_status_filter != "All":
+            filtered_drafts = [d for d in filtered_drafts if d["status"] == draft_status_filter]
+        if draft_search.strip():
+            term = draft_search.strip().lower()
+            filtered_drafts = [
+                d for d in filtered_drafts
+                if term in (d.get("person_name") or "").lower()
+                or term in (d.get("business_name") or "").lower()
+            ]
+
+        st.caption(f"Showing **{len(filtered_drafts)}** of **{len(all_drafts)}** drafts")
+
+        # Emails already sent — persists across draft clears via campaigns table
+        # get_campaign_status_map returns {email: sent_date} for all sent rows
+        sent_emails = set(get_campaign_status_map().keys())
+
+        for draft in filtered_drafts:
+            candidate_emails = draft.get("candidate_emails") or []
+            all_sent = draft["status"] == "sent" or (
+                bool(candidate_emails) and all(e.lower() in sent_emails for e in candidate_emails)
+            )
+            status_label = "SENT" if all_sent else draft["status"].upper()
+
+            with st.expander(
+                f"{draft['person_name']} — {draft['title']} | {draft['business_name']} | [{status_label}]"
+            ):
+                if draft.get("website_url"):
+                    st.markdown(f"**Website:** [{draft['website_url']}]({draft['website_url']})")
+                st.markdown(f"**To:** {', '.join(candidate_emails) or '—'}")
+                st.markdown(f"**Subject:** {draft['subject']}")
+                st.markdown("**Body:**")
+                st.text(draft["body"])
+
+                if all_sent:
+                    st.caption("Already sent to all addresses for this person.")
+                else:
+                    btn_col1, btn_col2 = st.columns([2, 1])
+                    with btn_col1:
+                        send_clicked = st.button(
+                            "Send to all addresses",
+                            key=f"send_draft_{draft['id']}",
+                            type="primary",
+                            use_container_width=True,
+                        )
+                    with btn_col2:
+                        delete_clicked = st.button(
+                            "Delete",
+                            key=f"delete_draft_{draft['id']}",
+                            use_container_width=True,
+                        )
+                    if delete_clicked:
+                        delete_draft(draft["id"])
+                        st.rerun()
+                    if send_clicked:
+                        any_ok = False
+                        for email in candidate_emails:
+                            if email.lower() in sent_emails:
+                                continue
+                            ok, msg = send_email(
+                                to_address=email,
+                                subject=draft["subject"],
+                                body=draft["body"],
+                            )
+                            if ok:
+                                save_campaign_send(email, draft["business_name"], "sent")
+                                sent_emails.add(email.lower())
+                                any_ok = True
+                            else:
+                                st.warning(f"Failed to send to {email}: {msg}")
+                        if any_ok:
+                            mark_draft_sent(draft["id"])
+                            st.success(f"Sent to all addresses for {draft['person_name']}")
+                            st.rerun()
+                        else:
+                            st.error("All sends failed — check SMTP settings.")

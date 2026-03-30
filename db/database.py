@@ -62,11 +62,13 @@ def init_db() -> None:
             )
         """)
         # Migrate existing DBs that don't have the new columns yet
-        for col, default in [("country", "Nigeria"), ("timezone", "Africa/Lagos")]:
+        for col, sql in [
+            ("country",     "TEXT DEFAULT 'Nigeria'"),
+            ("timezone",    "TEXT DEFAULT 'Africa/Lagos'"),
+            ("enriched_at", "TEXT"),
+        ]:
             try:
-                conn.execute(
-                    f"ALTER TABLE businesses ADD COLUMN {col} TEXT DEFAULT '{default}'"
-                )
+                conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {sql}")
             except sqlite3.OperationalError:
                 pass  # column already exists
         conn.execute("""
@@ -77,6 +79,37 @@ def init_db() -> None:
                 sent_at       TEXT,
                 status        TEXT,
                 opened_at     TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS contacts (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                place_id         TEXT,
+                business_name    TEXT,
+                domain           TEXT,
+                person_name      TEXT,
+                title            TEXT,
+                candidate_email  TEXT UNIQUE,
+                pattern_used     TEXT,
+                smtp_status      TEXT DEFAULT 'unknown',
+                source_page_url  TEXT,
+                enriched_at      TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS drafts (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                place_id         TEXT,
+                business_name    TEXT,
+                website_url      TEXT,
+                person_name      TEXT,
+                title            TEXT,
+                candidate_emails TEXT,
+                subject          TEXT,
+                body             TEXT,
+                status           TEXT DEFAULT 'pending',
+                created_at       TEXT DEFAULT (datetime('now')),
+                UNIQUE (person_name, place_id)
             )
         """)
         # Migrate existing campaigns table
@@ -443,6 +476,32 @@ def get_available_count(region: str = "All") -> int:
     return count
 
 
+def get_opened_leads() -> list[dict]:
+    """
+    Returns all leads that have opened their email, ordered by most recent open.
+    Each dict has: email, business_name, sent_at, opened_at
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT c.email, c.business_name, c.sent_at, c.opened_at
+            FROM campaigns c
+            WHERE c.opened_at IS NOT NULL
+            ORDER BY c.opened_at DESC
+            """
+        ).fetchall()
+    return [
+        {
+            "email":         r[0],
+            "business_name": r[1] or "",
+            "sent_at":       r[2][:16].replace("T", " ") if r[2] else "",
+            "opened_at":     r[3][:16].replace("T", " ") if r[3] else "",
+        }
+        for r in rows
+    ]
+
+
 def get_campaign_status_map() -> dict[str, str]:
     """
     Returns a dict mapping each emailed address to the date it was sent.
@@ -455,6 +514,174 @@ def get_campaign_status_map() -> dict[str, str]:
             "SELECT email, sent_at FROM campaigns WHERE status = 'sent'"
         ).fetchall()
     return {row[0].lower(): row[1][:10] for row in rows if row[0] and row[1]}
+
+
+def get_enrichment_status(limit: int = 100) -> list[dict]:
+    """
+    Returns a status table for the Streamlit enrichment UI.
+    Shows all businesses with their enrichment state and contact count.
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                b.business_name,
+                b.website_url,
+                b.country,
+                CASE
+                    WHEN b.website_url IS NULL OR b.website_url = '' THEN 'No website'
+                    WHEN b.enriched_at IS NOT NULL THEN 'Done'
+                    ELSE 'Pending'
+                END AS status,
+                b.enriched_at,
+                COUNT(c.id) AS contacts_found
+            FROM businesses b
+            LEFT JOIN contacts c ON c.place_id = b.place_id
+            WHERE b.country = 'Nigeria'
+            GROUP BY b.place_id
+            ORDER BY
+                CASE WHEN b.enriched_at IS NOT NULL THEN 0 ELSE 1 END,
+                b.enriched_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "business_name":  r[0] or "",
+            "website_url":    r[1] or "",
+            "country":        r[2] or "",
+            "status":         r[3],
+            "enriched_at":    r[4][:16].replace("T", " ") if r[4] else "",
+            "contacts_found": r[5],
+        }
+        for r in rows
+    ]
+
+
+def get_unenriched_businesses(limit: int = 10, country: str = "Nigeria") -> list[dict]:
+    """
+    Returns businesses that have a website_url but have not yet been enriched
+    (enriched_at IS NULL). Prioritises the given country, falls back to all
+    countries if not enough rows exist for that country.
+    Returns dicts with place_id, business_name, website_url, email.
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        params: list = []
+        country_clause = ""
+        if country and country != "All":
+            country_clause = "AND country = ?"
+            params.append(country)
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT place_id, business_name, website_url, email
+            FROM businesses
+            WHERE website_url IS NOT NULL AND website_url != ''
+              AND enriched_at IS NULL
+              {country_clause}
+            ORDER BY scraped_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [
+        {
+            "place_id":      r[0] or "",
+            "business_name": r[1] or "",
+            "website_url":   r[2] or "",
+            "email":         r[3] or "",
+        }
+        for r in rows
+    ]
+
+
+def mark_business_enriched(place_id: str) -> None:
+    """Stamps enriched_at on the businesses row so we don't re-process it."""
+    init_db()
+    from datetime import datetime
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE businesses SET enriched_at = ? WHERE place_id = ?",
+            (datetime.now().isoformat(), place_id),
+        )
+        conn.commit()
+
+
+def save_contacts(contacts: list[dict]) -> int:
+    """
+    Inserts contact rows. Skips duplicates (UNIQUE on candidate_email).
+    Each dict must have: place_id, business_name, domain, person_name, title,
+    candidate_email, pattern_used, smtp_status, source_page_url.
+    Returns number of rows inserted.
+    """
+    init_db()
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    inserted = 0
+    with sqlite3.connect(DB_PATH) as conn:
+        for c in contacts:
+            try:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO contacts
+                        (place_id, business_name, domain, person_name, title,
+                         candidate_email, pattern_used, smtp_status, source_page_url, enriched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        c.get("place_id", ""),
+                        c.get("business_name", ""),
+                        c.get("domain", ""),
+                        c.get("person_name", ""),
+                        c.get("title", ""),
+                        c.get("candidate_email", "").lower(),
+                        c.get("pattern_used", ""),
+                        c.get("smtp_status", "unknown"),
+                        c.get("source_page_url", ""),
+                        now,
+                    ),
+                )
+                inserted += conn.execute("SELECT changes()").fetchone()[0]
+            except sqlite3.IntegrityError:
+                pass
+        conn.commit()
+    return inserted
+
+
+def get_all_contacts() -> list[dict]:
+    """Returns every contact row ordered by most recently enriched."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM contacts ORDER BY enriched_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_contact_stats() -> dict:
+    """Summary counts for the Decision Makers tab."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        total = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
+        verified = conn.execute(
+            "SELECT COUNT(*) FROM contacts WHERE smtp_status = 'verified'"
+        ).fetchone()[0]
+        catch_all = conn.execute(
+            "SELECT COUNT(*) FROM contacts WHERE smtp_status = 'catch_all'"
+        ).fetchone()[0]
+        businesses_enriched = conn.execute(
+            "SELECT COUNT(*) FROM businesses WHERE enriched_at IS NOT NULL"
+        ).fetchone()[0]
+    return {
+        "total_contacts":       total,
+        "verified":             verified,
+        "catch_all":            catch_all,
+        "businesses_enriched":  businesses_enriched,
+    }
 
 
 def get_campaign_stats() -> dict:
@@ -492,3 +719,138 @@ def get_campaign_stats() -> dict:
         "sent_today":        sent_today,
         "total_opens":       total_opens,
     }
+
+
+# ── Drafts ─────────────────────────────────────────────────────────────────────
+
+def get_contacts_without_drafts() -> list[dict]:
+    """
+    Returns one row per person per business that doesn't yet have a draft.
+    All candidate emails for that person are aggregated into a list.
+    Each row has: place_id, business_name, website_url, person_name,
+    title, candidate_emails (list of str).
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT
+                c.place_id,
+                c.business_name,
+                b.website_url,
+                c.person_name,
+                c.title,
+                GROUP_CONCAT(c.candidate_email, ',') AS candidate_emails
+            FROM contacts c
+            LEFT JOIN businesses b ON c.place_id = b.place_id
+            WHERE (c.person_name || '|' || c.place_id) NOT IN (
+                SELECT person_name || '|' || place_id FROM drafts
+            )
+            GROUP BY c.person_name, c.place_id
+            ORDER BY c.business_name, c.person_name
+        """).fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        row["candidate_emails"] = row["candidate_emails"].split(",") if row["candidate_emails"] else []
+        result.append(row)
+    return result
+
+
+def save_drafts(drafts: list[dict]) -> int:
+    """
+    Inserts draft rows. One row per person per business (UNIQUE on person_name + place_id).
+    Each dict must have: place_id, business_name, website_url, person_name,
+    title, candidate_emails (list), subject, body.
+    Returns number of rows inserted.
+    """
+    import json as _json
+    init_db()
+    inserted = 0
+    with sqlite3.connect(DB_PATH) as conn:
+        for d in drafts:
+            try:
+                emails = d.get("candidate_emails", [])
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO drafts
+                        (place_id, business_name, website_url, person_name,
+                         title, candidate_emails, subject, body, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    """,
+                    (
+                        d.get("place_id", ""),
+                        d.get("business_name", ""),
+                        d.get("website_url", ""),
+                        d.get("person_name", ""),
+                        d.get("title", ""),
+                        _json.dumps(emails),
+                        d.get("subject", ""),
+                        d.get("body", ""),
+                    ),
+                )
+                inserted += conn.execute("SELECT changes()").fetchone()[0]
+            except sqlite3.IntegrityError:
+                pass
+        conn.commit()
+    return inserted
+
+
+def get_all_drafts() -> list[dict]:
+    """Returns all draft rows ordered by most recently created."""
+    import json as _json
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM drafts ORDER BY created_at DESC"
+        ).fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        try:
+            row["candidate_emails"] = _json.loads(row.get("candidate_emails") or "[]")
+        except Exception:
+            row["candidate_emails"] = []
+        result.append(row)
+    return result
+
+
+def update_draft(draft_id: int, subject: str, body: str) -> None:
+    """Updates subject and body of a draft (for inline editing)."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE drafts SET subject = ?, body = ? WHERE id = ?",
+            (subject, body, draft_id),
+        )
+        conn.commit()
+
+
+def mark_draft_sent(draft_id: int) -> None:
+    """Marks a draft as sent."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE drafts SET status = 'sent' WHERE id = ?",
+            (draft_id,),
+        )
+        conn.commit()
+
+
+def delete_draft(draft_id: int) -> None:
+    """Permanently deletes a draft row."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
+        conn.commit()
+
+
+def get_draft_stats() -> dict:
+    """Summary counts for the drafts section."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        total   = conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
+        pending = conn.execute("SELECT COUNT(*) FROM drafts WHERE status = 'pending'").fetchone()[0]
+        sent    = conn.execute("SELECT COUNT(*) FROM drafts WHERE status = 'sent'").fetchone()[0]
+    return {"total": total, "pending": pending, "sent": sent, "emails_sent": sent}
