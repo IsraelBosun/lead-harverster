@@ -7,7 +7,7 @@ and downloading the Excel export.
 
 Prerequisites:
     Start the FastAPI backend first:
-        venv/Scripts/python.exe -m uvicorn api:app --reload
+        venv/Scripts/python.exe run_api.py
 
 Then run this app:
     venv/Scripts/python.exe -m streamlit run streamlit_app.py
@@ -23,19 +23,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from db.database import (
-    get_available_count,
-    get_campaign_stats,
     get_contact_stats,
-    get_all_contacts,
-    get_enrichment_status,
-    get_leads_for_campaign,
+    get_unenriched_count,
+    get_verification_stats,
+    get_sendable_contacts,
+    get_verified_contacts_without_drafts,
+    get_campaign_status_map,
     get_opened_leads,
     save_campaign_send,
     get_all_drafts,
     get_draft_stats,
     mark_draft_sent,
     delete_draft,
-    get_campaign_status_map,
+    update_draft,
 )
 from emailer.sender import send_email
 from emailer.templates import render as render_template
@@ -419,7 +419,7 @@ st.markdown("""
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 
-tab_scrape, tab_campaigns, tab_dm = st.tabs(["Scrape", "Campaigns", "Decision Makers"])
+tab_scrape, tab_enrich, tab_outreach = st.tabs(["Scrape", "Enrich & Verify", "Outreach"])
 
 
 
@@ -487,7 +487,7 @@ with tab_scrape:
             )
 
         st.markdown("<div style='height: 0.5rem'></div>", unsafe_allow_html=True)
-        run_clicked = st.button("Run Scrape", type="primary", use_container_width=True)
+        run_clicked = st.button("Run Scrape", type="primary", width='stretch')
 
         if run_clicked:
             if not category.strip():
@@ -754,7 +754,7 @@ with tab_scrape:
             if display_rows:
                 st.dataframe(
                     display_rows,
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True,
                     column_config={
                         "Business Name": st.column_config.TextColumn("Business Name", width="large"),
@@ -785,565 +785,342 @@ with tab_scrape:
 
         st.divider()
 
-        if st.button("Start a New Scrape", type="primary", use_container_width=True):
+        if st.button("Start a New Scrape", type="primary", width='stretch'):
             _reset_to_idle()
             st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Campaigns
+# TAB 2 — Enrich & Verify
 # ══════════════════════════════════════════════════════════════════════════════
 
-with tab_campaigns:
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Enrich & Verify
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_enrich:
+
+    st.markdown('<p class="lh-section-title">Enrich & Verify</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="lh-section-sub">'
+        'Find decision-makers on business websites, then verify their emails via mails.so.</p>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Stats ────────────────────────────────────────────────────────────────
+
+    dm_stats       = get_contact_stats()
+    ver_stats      = get_verification_stats()
+    pending_enrich = get_unenriched_count(country="Nigeria")
+
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Enriched",             dm_stats["businesses_enriched"])
+    e2.metric("Contacts Found",       dm_stats["total_contacts"])
+    e3.metric("Pending Enrich",       pending_enrich)
+    e4.metric("Verified / Catch-All", f"{ver_stats['verified']} / {ver_stats['catch_all']}")
+
+    st.divider()
+
+    # ── Find Decision Makers ─────────────────────────────────────────────────
+
+    st.markdown("**Find Decision Makers**")
+    st.caption(
+        "Visits team/about pages of unenriched businesses, uses Gemini to extract "
+        "names and titles. Sites that time out are skipped and retried next run."
+    )
+
+    if not os.getenv("GEMINI_API_KEY"):
+        st.warning("GEMINI_API_KEY not set in .env — enrichment will return no results.")
+
+    enrich_col1, enrich_col2 = st.columns([3, 1])
+    with enrich_col1:
+        enrich_limit = st.number_input(
+            "Businesses to enrich",
+            min_value=1,
+            max_value=max(pending_enrich, 1),
+            value=min(10, max(pending_enrich, 1)),
+            step=10,
+            help="Each business takes 15-60 seconds depending on site speed.",
+        )
+    with enrich_col2:
+        st.markdown("<div style='height:1.85rem'></div>", unsafe_allow_html=True)
+        enrich_clicked = st.button("Run Enrichment", type="primary", width='stretch')
+
+    if enrich_clicked:
+        from enricher.enricher import enrich_businesses
+        with st.spinner(f"Enriching up to {enrich_limit} businesses — this may take several minutes..."):
+            result = enrich_businesses(limit=int(enrich_limit))
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric("Processed",      result["businesses_processed"])
+        ec2.metric("People Found",   result["people_found"])
+        ec3.metric("Contacts Saved", result["saved"])
+        if result["saved"] > 0:
+            st.success(f"{result['saved']} new contacts saved.")
+        elif result["people_found"] == 0:
+            st.info("No decision-maker profiles found. Try running again for more businesses.")
+        st.rerun()
+
+    st.divider()
+
+    # ── Verify Emails ────────────────────────────────────────────────────────
+
+    st.markdown("**Verify Contact Emails**")
+    st.caption(
+        "Generates all email pattern variants per person and pings each via mails.so. "
+        "Domains that time out are skipped. Results saved to the verification table."
+    )
+
+    if not os.getenv("MAILS_SO_API_KEY"):
+        st.warning("MAILS_SO_API_KEY not set in .env — verification will not run.")
+
+    v1, v2 = st.columns([3, 1])
+    with v2:
+        verify_clicked = st.button("Run Verification", type="primary", width='stretch')
+    with v1:
+        new_count = ver_stats["new_persons_to_verify"]
+        if new_count == 0:
+            st.caption("No new contacts to verify — all enriched domains have already been processed.")
+        else:
+            st.caption(f"{new_count} newly enriched person{'s' if new_count != 1 else ''} ready to verify.")
+
+    if verify_clicked:
+        from verify_contacts import run_verification
+        with st.spinner("Verifying contact emails via mails.so — this may take a few minutes..."):
+            vresult = run_verification()
+        if vresult is None or (vresult.get("verified", 0) == 0 and vresult.get("catch_all", 0) == 0 and vresult.get("rejected", 0) == 0):
+            st.rerun()
+        else:
+            vc1, vc2, vc3, vc4 = st.columns(4)
+            vc1.metric("Verified",  vresult.get("verified", 0))
+            vc2.metric("Catch-All", vresult.get("catch_all", 0))
+            vc3.metric("Rejected",  vresult.get("rejected", 0))
+            vc4.metric("Unknown",   vresult.get("unknown", 0))
+            st.success(f"Done. {vresult.get('total_saved', 0)} total results saved.")
+            st.rerun()
+
+    st.divider()
+
+    # ── Results Table ────────────────────────────────────────────────────────
+
+    sendable = get_sendable_contacts()
+    st.markdown(
+        f'<p class="lh-section-title">'
+        f'Ready to Send <span style="font-weight:400;color:#9ca3af;">'
+        f'{len(sendable)} contacts</span></p>',
+        unsafe_allow_html=True,
+    )
+
+    if not sendable:
+        st.info("No verified or catch-all contacts yet. Run enrichment then verification above.")
+    else:
+        import pandas as pd
+        sent_map = set(get_campaign_status_map().keys())
+        df_sendable = pd.DataFrame(sendable)[["status", "email", "person_name", "title", "business_name", "domain", "ssl_issue"]]
+        df_sendable.columns = ["Status", "Email", "Name", "Title", "Business", "Domain", "ssl_issue"]
+        df_sendable["_ord"] = df_sendable["Status"].map({"verified": 0, "catch_all": 1}).fillna(2)
+        df_sendable = df_sendable.sort_values("_ord").drop(columns="_ord").reset_index(drop=True)
+        df_sendable["Sent"] = df_sendable["Email"].str.lower().apply(lambda e: "Yes" if e in sent_map else "No")
+        df_sendable["SSL Issue"] = df_sendable["ssl_issue"].apply(lambda x: "Yes" if x else "")
+        df_sendable = df_sendable.drop(columns="ssl_issue")
+        df_sendable.insert(0, "#", df_sendable.index + 1)
+        st.dataframe(
+            df_sendable,
+            width='stretch',
+            hide_index=True,
+            column_config={"#": st.column_config.NumberColumn("#", width="small")},
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Outreach
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_outreach:
 
     _EMAIL_DAILY_LIMIT = int(os.getenv("EMAIL_DAILY_LIMIT", "50"))
     _EMAIL_DELAY       = float(os.getenv("EMAIL_DELAY_SECONDS", "3"))
 
-    st.markdown('<p class="lh-section-title">Email Campaigns</p>', unsafe_allow_html=True)
+    st.markdown('<p class="lh-section-title">Outreach</p>', unsafe_allow_html=True)
     st.markdown(
         '<p class="lh-section-sub">'
-        'Send cold outreach emails to scraped leads. Emails only go to leads '
-        'currently within business hours (9am–6pm) in their timezone.</p>',
+        'Generate personalised Gemini drafts for verified contacts and send cold emails.</p>',
         unsafe_allow_html=True,
     )
 
-    # ── Region work-hours status cards ──────────────────────────────────────
+    # ── Stats ────────────────────────────────────────────────────────────────
 
-    region_statuses = get_region_work_status()
-    card_cols = st.columns(len(region_statuses))
-    for col, rs in zip(card_cols, region_statuses):
-        if rs["in_work_hours"]:
-            bg, border, label_color, status_text = "#f0fdf4", "#bbf7d0", "#15803d", "In work hours"
-        else:
-            bg, border, label_color, status_text = "#fff1f2", "#fecdd3", "#be123c", "Outside hours"
-        col.markdown(
-            f"""
-            <div style="background:{bg};border:1px solid {border};border-radius:12px;
-                        padding:0.85rem 1rem;text-align:center;">
-                <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;
-                            color:#9ca3af;letter-spacing:0.6px;">{rs['region']}</div>
-                <div style="font-size:1.1rem;font-weight:700;color:{label_color};
-                            margin:0.2rem 0;">{rs['local_time']}</div>
-                <div style="font-size:0.75rem;color:{label_color};">{status_text}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    ver_stats_out   = get_verification_stats()
+    draft_stats_out = get_draft_stats()
+    remaining_today = max(0, _EMAIL_DAILY_LIMIT - ver_stats_out["sent_today"])
 
-    st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
-
-    # ── Stats row ───────────────────────────────────────────────────────────
-
-    stats = get_campaign_stats()
-    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-    sc1.metric("Total with Email",  stats["total_with_email"])
-    sc2.metric("Already Contacted", stats["already_contacted"])
-    sc3.metric("Available to Send", stats["available_to_send"])
-    sc4.metric("Sent Today",        stats["sent_today"])
-    sc5.metric("Emails Opened",     stats.get("total_opens", 0))
+    o1, o2, o3, o4, o5 = st.columns(5)
+    o1.metric("Ready to Send",   ver_stats_out["not_emailed"])
+    o2.metric("Sent Total",      ver_stats_out["sent_total"])
+    o3.metric("Sent Today",      ver_stats_out["sent_today"])
+    o4.metric("Remaining Today", remaining_today)
+    o5.metric("Drafts Pending",  draft_stats_out["pending"])
 
     st.divider()
 
-    # ── Test send ───────────────────────────────────────────────────────────
+    # ── Test Delivery ─────────────────────────────────────────────────────────
 
     st.markdown("**Test Delivery**")
-    st.caption(
-        "Send a preview email to your own address to confirm delivery "
-        "before running a real campaign."
-    )
-
-    test_col1, test_col2 = st.columns([3, 1])
-    with test_col1:
+    t1, t2 = st.columns([3, 1])
+    with t1:
         test_addr = st.text_input(
-            "Your personal email address",
+            "Test email address",
             placeholder="yourname@gmail.com",
-            label_visibility="visible",
+            label_visibility="collapsed",
         )
-    with test_col2:
-        st.markdown("<div style='height: 1.85rem'></div>", unsafe_allow_html=True)
-        test_clicked = st.button("Send Test", type="secondary", use_container_width=True)
+    with t2:
+        test_clicked = st.button("Send Test", type="secondary", width='stretch')
 
     if test_clicked:
         if not test_addr.strip() or "@" not in test_addr:
-            st.warning("Enter a valid email address to test.")
+            st.warning("Enter a valid email address.")
         else:
-            subject, body = render_template("Bluehydra Labs")
-            with st.spinner(f"Sending test email to {test_addr}..."):
+            from emailer.templates import render as render_template
+            subject, body = render_template("Blue Hydra Labs")
+            with st.spinner("Sending test..."):
                 ok, reason = send_email(test_addr.strip(), subject, body)
             if ok:
-                save_campaign_send(test_addr.strip(), "Bluehydra Labs", "sent")
-                st.success(f"Test email sent to {test_addr}. Check your inbox (and spam folder).")
+                save_campaign_send(test_addr.strip(), "Blue Hydra Labs", "sent")
+                st.success(f"Test sent to {test_addr}. Check your inbox.")
             else:
                 st.error(f"Send failed: {reason}")
-                st.info(
-                    "Check that SMTP_USER, SMTP_PASSWORD, SMTP_HOST are correct in your `.env` file."
-                )
 
     st.divider()
 
-    # ── Email preview ───────────────────────────────────────────────────────
+    # ── Generate Drafts ───────────────────────────────────────────────────────
 
-    with st.expander("Preview email template"):
-        prev_subject, prev_body = render_template("Bluehydra Labs")
-        st.markdown(f"**Subject:** {prev_subject}")
-        st.text(prev_body)
+    st.markdown("**Generate Drafts**")
+    st.caption("Gemini writes a personalised cold email for each verified contact only. Catch-all and other statuses are excluded.")
 
-    st.divider()
-
-    # ── Campaign send ───────────────────────────────────────────────────────
-
-    st.markdown("**Send Campaign**")
-
-    # Region filter
-    region_options = ["All"] + list(REGION_COUNTRIES.keys())
-    selected_region = st.selectbox(
-        "Target region",
-        options=region_options,
-        index=0,
-        help="Filter leads by region. Only leads currently in work hours (9am-6pm) will be sent to.",
-    )
-
-    available = get_available_count(selected_region)
-    remaining_today = max(0, _EMAIL_DAILY_LIMIT - stats["sent_today"])
-
-    if selected_region != "All":
-        st.caption(f"{available} unsent leads in {selected_region} region.")
-
-    if available == 0:
-        st.info(
-            f"No leads available for '{selected_region}'. "
-            "Run a scrape for this region first, or choose a different region."
-        )
-    elif remaining_today == 0:
-        st.warning(
-            f"Daily limit of {_EMAIL_DAILY_LIMIT} emails already reached for today. "
-            "Come back tomorrow."
-        )
-    else:
-        batch_max = min(available, remaining_today)
-        if batch_max == 1:
-            batch_size = 1
-            st.info("1 email available to send.")
-        else:
-            batch_size = st.slider(
-                "Emails to send in this batch",
-                min_value=1,
-                max_value=batch_max,
-                value=min(10, batch_max),
-                help=f"Daily limit: {_EMAIL_DAILY_LIMIT}. Sent today: {stats['sent_today']}. Available: {available}.",
-            )
-
-        send_clicked = st.button(
-            f"Send to {batch_size} Lead{'s' if batch_size > 1 else ''}",
-            type="primary",
-            use_container_width=True,
-        )
-
-        if send_clicked:
-            leads = get_leads_for_campaign(limit=batch_size, region=selected_region)
-
-            if not leads:
-                st.warning("No leads found to send to.")
-            else:
-                progress_bar = st.progress(0.0)
-                status_text  = st.empty()
-                sent = failed = skipped = 0
-                skipped_list: list[str] = []
-                failed_list:  list[str] = []
-                sent_list:    list[str] = []
-
-                for i, lead in enumerate(leads):
-                    label = lead["business_name"] or lead["email"]
-
-                    # Timezone check — skip if outside business hours
-                    if not is_work_hours(lead["timezone"]):
-                        skipped += 1
-                        skipped_list.append(
-                            f"{label} ({lead['country']} — currently outside 9am-6pm)"
-                        )
-                        progress_bar.progress((i + 1) / len(leads))
-                        status_text.text(f"Checking {i + 1} of {len(leads)}: {label}")
-                        continue
-
-                    status_text.text(f"Sending {i + 1} of {len(leads)}: {label}")
-                    subject, body = render_template(lead["business_name"])
-                    ok, _ = send_email(lead["email"], subject, body)
-
-                    if ok:
-                        save_campaign_send(lead["email"], lead["business_name"], "sent")
-                        sent += 1
-                        sent_list.append(label)
-                    else:
-                        save_campaign_send(lead["email"], lead["business_name"], "failed")
-                        failed += 1
-                        failed_list.append(label)
-
-                    progress_bar.progress((i + 1) / len(leads))
-
-                    if i < len(leads) - 1:
-                        time.sleep(_EMAIL_DELAY)
-
-                status_text.empty()
-                progress_bar.progress(1.0)
-                refresh_master_excel_campaign_status()
-
-                # ── Results summary ──────────────────────────────────────
-                r1, r2, r3 = st.columns(3)
-                r1.metric("Sent", sent)
-                r2.metric("Skipped (out of hours)", skipped)
-                r3.metric("Failed", failed)
-
-                if sent_list:
-                    with st.expander(f"Sent ({len(sent_list)})"):
-                        for name in sent_list:
-                            st.markdown(f"- {name}")
-
-                if skipped_list:
-                    with st.expander(f"Skipped — outside work hours ({len(skipped_list)}) — will retry next send"):
-                        for name in skipped_list:
-                            st.markdown(f"- {name}")
-
-                if failed_list:
-                    with st.expander(f"Failed ({len(failed_list)})"):
-                        for name in failed_list:
-                            st.markdown(f"- {name}")
-
-                if sent == 0 and skipped == 0:
-                    st.error("All sends failed. Check your SMTP settings in `.env`.")
-
-                st.rerun()
-
-    st.divider()
-
-    # ── Who opened ──────────────────────────────────────────────────────────
-
-    st.markdown("**Who Opened Your Emails**")
-    opened = get_opened_leads()
-    if not opened:
-        st.info("No opens tracked yet. Opens will appear here once recipients view your emails.")
-    else:
-        import pandas as pd
-        df_opens = pd.DataFrame(opened)
-        df_opens.columns = ["Email", "Business Name", "Sent At", "Opened At"]
-        st.dataframe(df_opens, use_container_width=True, hide_index=True)
-
-    st.divider()
-
-    # ── Rebuild master Excel ─────────────────────────────────────────────────
-
-    st.markdown("**Rebuild Master Excel from Database**")
-    st.caption("Use this to recover the master Excel file if it was deleted or corrupted. Pulls all data from SQLite.")
-    if st.button("Rebuild Master Excel", type="secondary"):
-        with st.spinner("Rebuilding master Excel from database..."):
-            path = rebuild_master_excel_from_db()
-        st.success(f"Master Excel rebuilt — {path}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Decision Makers
-# ══════════════════════════════════════════════════════════════════════════════
-
-with tab_dm:
-
-    st.markdown('<p class="lh-section-title">Decision Makers</p>', unsafe_allow_html=True)
-    st.markdown(
-        '<p class="lh-section-sub">'
-        'Find CEOs, MDs, Founders and other key contacts from business team pages. '
-        'Candidate emails are generated from name patterns and saved for outreach.</p>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Stats row ───────────────────────────────────────────────────────────
-
-    dm_stats = get_contact_stats()
-    ds1, ds2, ds3 = st.columns(3)
-    ds1.metric("Businesses Enriched", dm_stats["businesses_enriched"])
-    ds2.metric("Contacts Found",      dm_stats["total_contacts"])
-    ds3.metric("Pending",             340 - dm_stats["businesses_enriched"])
-
-    st.divider()
-
-    # ── Enrichment controls ─────────────────────────────────────────────────
-
-    st.markdown("**Run Enrichment**")
-    st.caption(
-        "Visits team/about pages of Nigerian businesses in your DB, extracts "
-        "decision-maker names and titles, and generates candidate emails. "
-        "Only processes businesses not yet enriched. Sites that time out are "
-        "skipped and retried on the next run."
-    )
-
-    enrich_col1, enrich_col2 = st.columns([2, 1])
-    with enrich_col1:
-        enrich_limit = st.number_input(
-            "Number of businesses to enrich",
-            min_value=1, max_value=340, value=10, step=10,
-            help="Each business takes 15-60 seconds depending on site speed.",
-        )
-    with enrich_col2:
-        st.markdown("<div style='height: 1.85rem'></div>", unsafe_allow_html=True)
-        enrich_clicked = st.button("Run Enrichment", type="primary", use_container_width=True)
-
-    if enrich_clicked:
-        from enricher.enricher import enrich_businesses
-
-        with st.spinner(f"Enriching up to {enrich_limit} businesses... this may take several minutes."):
-            result = enrich_businesses(limit=int(enrich_limit))
-
-        ec1, ec2, ec3 = st.columns(3)
-        ec1.metric("Processed",    result["businesses_processed"])
-        ec2.metric("People Found", result["people_found"])
-        ec3.metric("Contacts Saved", result["saved"])
-
-        if result["people_found"] == 0:
-            st.info(
-                "No decision-maker profiles found on these sites. "
-                "Many small Nigerian SMB sites don't have a team page. "
-                "Try running again to process more businesses."
-            )
-        elif result["saved"] > 0:
-            st.success(f"{result['saved']} new decision-maker contacts saved.")
-
-        st.rerun()
-
-    st.divider()
-
-    # ── Enrichment status table ─────────────────────────────────────────────
-
-    st.markdown("**Enrichment Status**")
-    st.caption("Shows the last 100 Nigerian businesses and their enrichment state.")
-
-    enrich_status = get_enrichment_status(limit=100)
-
-    if enrich_status:
-        STATUS_COLS = ["business_name", "status", "contacts_found", "enriched_at", "website_url"]
-        status_rows = [{col: r.get(col, "") for col in STATUS_COLS} for r in enrich_status]
-        st.dataframe(
-            status_rows,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "business_name":  st.column_config.TextColumn("Business",      width="large"),
-                "status":         st.column_config.TextColumn("Status",        width="small"),
-                "contacts_found": st.column_config.NumberColumn("Contacts",    width="small"),
-                "enriched_at":    st.column_config.TextColumn("Enriched At",   width="medium"),
-                "website_url":    st.column_config.LinkColumn("Website", display_text="Visit"),
-            },
-        )
-
-    st.divider()
-
-    # ── Contacts table ──────────────────────────────────────────────────────
-
-    contacts = get_all_contacts()
-
-    st.markdown(
-        f'<p class="lh-section-title">'
-        f'Contacts &nbsp;<span style="font-weight:400; color:#9ca3af;">'
-        f'{len(contacts)} total</span></p>',
-        unsafe_allow_html=True,
-    )
-
-    if not contacts:
-        st.info("No contacts yet. Run enrichment above to find decision-makers.")
-    else:
-        st.markdown('<div class="lh-filter-row">', unsafe_allow_html=True)
-        fc1, fc2 = st.columns([1, 3])
-        with fc1:
-            dm_status_filter = st.selectbox(
-                "Status",
-                options=["All", "unverified", "verified", "catch_all"],
-                label_visibility="collapsed",
-            )
-        with fc2:
-            dm_name_filter = st.text_input(
-                "search",
-                placeholder="Filter by name or business...",
-                label_visibility="collapsed",
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        filtered_contacts = contacts
-        if dm_status_filter != "All":
-            filtered_contacts = [c for c in filtered_contacts if c["smtp_status"] == dm_status_filter]
-        if dm_name_filter.strip():
-            term = dm_name_filter.strip().lower()
-            filtered_contacts = [
-                c for c in filtered_contacts
-                if term in (c.get("person_name") or "").lower()
-                or term in (c.get("business_name") or "").lower()
-            ]
-
-        st.caption(f"Showing **{len(filtered_contacts)}** of **{len(contacts)}** contacts")
-
-        if filtered_contacts:
-            DM_COLS = ["person_name", "title", "candidate_email",
-                       "business_name", "pattern_used", "source_page_url"]
-            display_rows = [{col: c.get(col, "") for col in DM_COLS} for c in filtered_contacts]
-
-            st.dataframe(
-                display_rows,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "person_name":     st.column_config.TextColumn("Name",        width="medium"),
-                    "title":           st.column_config.TextColumn("Title",       width="medium"),
-                    "candidate_email": st.column_config.TextColumn("Email",       width="large"),
-                    "business_name":   st.column_config.TextColumn("Business",    width="medium"),
-                    "pattern_used":    st.column_config.TextColumn("Pattern",     width="small"),
-                    "source_page_url": st.column_config.LinkColumn("Source Page", display_text="View page"),
-                },
-            )
-        else:
-            st.info("No contacts match the current filters.")
-
-    st.divider()
-
-    # ── Drafts ──────────────────────────────────────────────────────────────
-
-    draft_stats = get_draft_stats()
-    st.markdown(
-        f'<p class="lh-section-title">'
-        f'Email Drafts &nbsp;<span style="font-weight:400; color:#9ca3af;">'
-        f'{draft_stats["total"]} total</span></p>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<p class="lh-section-sub">'
-        'Gemini writes a personalised cold email for each contact based on their '
-        'role and what their company website says. Review drafts here before sending.</p>',
-        unsafe_allow_html=True,
-    )
-
-    dr1, dr2, dr3 = st.columns(3)
-    dr1.metric("Total Drafts",   draft_stats["total"])
-    dr2.metric("Pending Send",   draft_stats["pending"])
-    dr3.metric("Emails Sent",    draft_stats["emails_sent"])
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    draft_col1, draft_col2 = st.columns([2, 1])
-    with draft_col1:
+    gc1, gc2 = st.columns([3, 1])
+    with gc1:
         draft_limit = st.number_input(
-            "Number of contacts to draft for",
+            "Contacts to draft for",
             min_value=1, max_value=500, value=20, step=10,
-            help="Gemini writes one email per contact. Each takes ~2 seconds.",
-            key="draft_limit",
+            label_visibility="collapsed",
+            help="Each draft takes ~2 seconds via Gemini.",
         )
-    with draft_col2:
-        st.markdown("<div style='height: 1.85rem'></div>", unsafe_allow_html=True)
-        draft_clicked = st.button("Generate Drafts", type="primary", use_container_width=True)
+    with gc2:
+        draft_clicked = st.button("Generate Drafts", type="primary", width='stretch')
 
     if draft_clicked:
+        import enricher.drafter as _drafter
+        _orig_fn = _drafter.get_contacts_without_drafts
+        _drafter.get_contacts_without_drafts = lambda: get_verified_contacts_without_drafts(limit=500)
         from enricher.drafter import generate_drafts
-        with st.spinner(f"Generating up to {draft_limit} email drafts with Gemini..."):
+        with st.spinner(f"Generating up to {draft_limit} drafts with Gemini..."):
             dresult = generate_drafts(limit=int(draft_limit))
+        _drafter.get_contacts_without_drafts = _orig_fn
         dc1, dc2, dc3 = st.columns(3)
-        dc1.metric("Contacts Processed", dresult["contacts_processed"])
-        dc2.metric("Drafts Saved",       dresult["drafts_saved"])
-        dc3.metric("Skipped",            dresult["skipped"])
+        dc1.metric("Processed", dresult["contacts_processed"])
+        dc2.metric("Saved",     dresult["drafts_saved"])
+        dc3.metric("Skipped",   dresult["skipped"])
         if dresult["drafts_saved"] > 0:
-            st.success(f"{dresult['drafts_saved']} drafts ready to review below.")
+            st.success(f"{dresult['drafts_saved']} drafts ready below.")
         st.rerun()
 
     st.divider()
 
-    # ── Draft review table ───────────────────────────────────────────────────
+    # ── Draft Cards ───────────────────────────────────────────────────────────
 
-    all_drafts = get_all_drafts()
+    all_drafts  = get_all_drafts()
+    sent_emails = set(get_campaign_status_map().keys())
 
-    if not all_drafts:
-        st.info("No drafts yet. Click 'Generate Drafts' above.")
+    pending_drafts = [
+        d for d in all_drafts
+        if d["status"] != "sent"
+        and not all(e.lower() in sent_emails for e in (d.get("candidate_emails") or []))
+    ]
+
+    if not pending_drafts:
+        if all_drafts:
+            st.info("All drafts have been sent.")
+        else:
+            st.info("No drafts yet. Click Generate Drafts above.")
     else:
-        drf1, drf2 = st.columns([1, 3])
-        with drf1:
-            draft_status_filter = st.selectbox(
-                "Draft status",
-                options=["All", "pending", "sent"],
-                label_visibility="collapsed",
-                key="draft_status_filter",
-            )
-        with drf2:
-            draft_search = st.text_input(
-                "search drafts",
-                placeholder="Filter by name or business...",
-                label_visibility="collapsed",
-                key="draft_search",
+        sa1, sa2 = st.columns([4, 1])
+        with sa1:
+            st.caption(f"{len(pending_drafts)} drafts pending.")
+        with sa2:
+            send_all_clicked = st.button(
+                "Send All", type="primary", width='stretch', key="send_all_drafts"
             )
 
-        filtered_drafts = all_drafts
-        if draft_status_filter != "All":
-            filtered_drafts = [d for d in filtered_drafts if d["status"] == draft_status_filter]
-        if draft_search.strip():
-            term = draft_search.strip().lower()
-            filtered_drafts = [
-                d for d in filtered_drafts
-                if term in (d.get("person_name") or "").lower()
-                or term in (d.get("business_name") or "").lower()
-            ]
+        if send_all_clicked:
+            total_ok = total_fail = 0
+            with st.spinner("Sending all pending drafts..."):
+                for draft in pending_drafts:
+                    for email in (draft.get("candidate_emails") or []):
+                        if email.lower() in sent_emails:
+                            continue
+                        ok, _ = send_email(email, draft["subject"], draft["body"])
+                        if ok:
+                            save_campaign_send(email, draft["business_name"], "sent")
+                            sent_emails.add(email.lower())
+                            total_ok += 1
+                            mark_draft_sent(draft["id"])
+                        else:
+                            total_fail += 1
+            if total_ok:
+                st.success(f"Sent {total_ok} emails.")
+            if total_fail:
+                st.warning(f"{total_fail} failed — check SMTP settings.")
+            st.rerun()
 
-        st.caption(f"Showing **{len(filtered_drafts)}** of **{len(all_drafts)}** drafts")
+        st.markdown("<br>", unsafe_allow_html=True)
 
-        # Emails already sent — persists across draft clears via campaigns table
-        # get_campaign_status_map returns {email: sent_date} for all sent rows
-        sent_emails = set(get_campaign_status_map().keys())
-
-        for draft in filtered_drafts:
+        for draft in pending_drafts:
             candidate_emails = draft.get("candidate_emails") or []
-            all_sent = draft["status"] == "sent" or (
-                bool(candidate_emails) and all(e.lower() in sent_emails for e in candidate_emails)
-            )
-            status_label = "SENT" if all_sent else draft["status"].upper()
-
             with st.expander(
-                f"{draft['person_name']} — {draft['title']} | {draft['business_name']} | [{status_label}]"
+                f"{draft['person_name']} — {draft['title']} | {draft['business_name']}"
             ):
-                if draft.get("website_url"):
-                    st.markdown(f"**Website:** [{draft['website_url']}]({draft['website_url']})")
-                st.markdown(f"**To:** {', '.join(candidate_emails) or '—'}")
-                st.markdown(f"**Subject:** {draft['subject']}")
-                st.markdown("**Body:**")
-                st.text(draft["body"])
-
-                if all_sent:
-                    st.caption("Already sent to all addresses for this person.")
-                else:
-                    btn_col1, btn_col2 = st.columns([2, 1])
-                    with btn_col1:
-                        send_clicked = st.button(
-                            "Send to all addresses",
-                            key=f"send_draft_{draft['id']}",
-                            type="primary",
-                            use_container_width=True,
-                        )
-                    with btn_col2:
-                        delete_clicked = st.button(
-                            "Delete",
-                            key=f"delete_draft_{draft['id']}",
-                            use_container_width=True,
-                        )
-                    if delete_clicked:
-                        delete_draft(draft["id"])
-                        st.rerun()
-                    if send_clicked:
+                st.markdown(f"**To:** {', '.join(candidate_emails) or 'No email'}")
+                edited_subject = st.text_input(
+                    "Subject", value=draft["subject"], key=f"subj_{draft['id']}"
+                )
+                edited_body = st.text_area(
+                    "Body", value=draft["body"], key=f"body_{draft['id']}", height=200
+                )
+                btn1, btn2 = st.columns(2)
+                with btn1:
+                    if st.button("Send", key=f"send_{draft['id']}", type="primary", width='stretch'):
+                        update_draft(draft["id"], edited_subject, edited_body)
                         any_ok = False
                         for email in candidate_emails:
                             if email.lower() in sent_emails:
                                 continue
-                            ok, msg = send_email(
-                                to_address=email,
-                                subject=draft["subject"],
-                                body=draft["body"],
-                            )
+                            ok, msg = send_email(email, edited_subject, edited_body)
                             if ok:
                                 save_campaign_send(email, draft["business_name"], "sent")
                                 sent_emails.add(email.lower())
                                 any_ok = True
                             else:
-                                st.warning(f"Failed to send to {email}: {msg}")
+                                st.warning(f"Failed: {email} — {msg}")
                         if any_ok:
                             mark_draft_sent(draft["id"])
-                            st.success(f"Sent to all addresses for {draft['person_name']}")
+                            st.success(f"Sent to {draft['person_name']}")
                             st.rerun()
                         else:
-                            st.error("All sends failed — check SMTP settings.")
+                            st.error("Send failed — check SMTP settings.")
+                with btn2:
+                    if st.button("Delete", key=f"del_{draft['id']}", width='stretch'):
+                        delete_draft(draft["id"])
+                        st.rerun()
+
+    st.divider()
+
+    # ── Sent Log ─────────────────────────────────────────────────────────────
+
+    st.markdown("**Sent Log**")
+    opened = get_opened_leads()
+    if opened:
+        import pandas as pd
+        df_log = pd.DataFrame(opened)
+        df_log.columns = ["Email", "Business", "Sent At", "Opened At"]
+        st.dataframe(df_log, width='stretch', hide_index=True)
+    else:
+        st.caption("No sends logged yet.")

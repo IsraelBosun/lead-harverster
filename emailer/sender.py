@@ -77,7 +77,6 @@ Connects to Namecheap Private Email SMTP and sends a single plain-text
 email. Called once per recipient by the Streamlit campaign tab.
 """
 
-import imaplib
 import os
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -97,23 +96,6 @@ SMTP_USER         = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD     = os.getenv("SMTP_PASSWORD", "")
 SENDER_NAME       = os.getenv("SENDER_NAME", "Bosun")
 TRACKING_BASE_URL = os.getenv("TRACKING_BASE_URL", "")
-IMAP_HOST         = os.getenv("IMAP_HOST", "mail.privateemail.com")
-IMAP_PORT         = int(os.getenv("IMAP_PORT", "993"))
-
-
-def _save_to_sent(raw_message: bytes) -> None:
-    """Appends a sent email to the IMAP Sent folder."""
-    try:
-        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-        imap.login(SMTP_USER, SMTP_PASSWORD)
-        # Try common Sent folder names
-        for folder in ("Sent", "INBOX.Sent", "Sent Items", "Sent Messages"):
-            result = imap.append(folder, "\\Seen", None, raw_message)
-            if result[0] == "OK":
-                break
-        imap.logout()
-    except Exception as exc:
-        logger.warning("Could not save to Sent folder: %s", exc)
 
 
 def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
@@ -163,7 +145,6 @@ def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
         raw = mime.as_bytes()
         server.sendmail(SENDER_EMAIL, [to_address], raw)
         logger.info("Email sent OK -> %s", to_address)
-        _save_to_sent(raw)
         return True, ""
 
     except Exception as exc:

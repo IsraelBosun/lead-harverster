@@ -142,10 +142,15 @@ def scrape_team_page(website_url: str):
 
     people = []
     all_emails: list[str] = []
+    ssl_issue = False
 
     # Windows requires ProactorEventLoop to spawn Chromium subprocesses.
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    # SSL error keywords that indicate a cert problem (not a dead domain)
+    _SSL_ERRORS = ("ERR_CERT_DATE_INVALID", "ERR_CERT_COMMON_NAME_INVALID",
+                   "ERR_CERT_AUTHORITY_INVALID", "ERR_CERT_WEAK_SIGNATURE_ALGORITHM")
 
     try:
         with sync_playwright() as pw:
@@ -169,9 +174,34 @@ def scrape_team_page(website_url: str):
                 browser.close()
                 return LOAD_FAILED
             except Exception as exc:
-                logger.warning("[TEAM] Homepage error %s: %s", website_url, exc)
-                browser.close()
-                return LOAD_FAILED
+                exc_str = str(exc)
+                # If it's an SSL cert error, retry with SSL validation disabled
+                if any(e in exc_str for e in _SSL_ERRORS):
+                    logger.warning("[TEAM] SSL error for %s — retrying without cert validation", website_url)
+                    browser.close()
+                    ssl_issue = True
+                    # Reopen with ignore_https_errors=True
+                    browser = pw.chromium.launch(headless=True)
+                    context = browser.new_context(
+                        ignore_https_errors=True,
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"
+                        )
+                    )
+                    page = context.new_page()
+                    try:
+                        page.goto(website_url, timeout=TIMEOUT_MS, wait_until="networkidle")
+                        homepage_html = page.content()
+                    except Exception as exc2:
+                        logger.warning("[TEAM] Homepage error after SSL bypass %s: %s", website_url, exc2)
+                        browser.close()
+                        return LOAD_FAILED
+                else:
+                    logger.warning("[TEAM] Homepage error %s: %s", website_url, exc)
+                    browser.close()
+                    return LOAD_FAILED
 
             # Step 2: collect all internal links
             internal_links = _get_internal_links(homepage_html, website_url)
@@ -224,7 +254,8 @@ def scrape_team_page(website_url: str):
     unique_emails = list(dict.fromkeys(all_emails))
 
     logger.info(
-        "[TEAM] %s => %d decision-makers, %d emails found",
+        "[TEAM] %s => %d decision-makers, %d emails found%s",
         website_url, len(unique), len(unique_emails),
+        " [SSL issue]" if ssl_issue else "",
     )
-    return unique, unique_emails
+    return unique, unique_emails, ssl_issue

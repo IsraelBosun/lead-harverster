@@ -8,11 +8,11 @@ Pipeline per business:
   1. Fetch unenriched businesses from DB (limit configurable).
   2. Run team_scraper  => list of (person_name, title, source_page_url)
   3. Run email_pattern => list of candidate email dicts
-  4. Run smtp_verifier => smtp_status added to each candidate
-  5. Keep only: verified, catch_all, and the best unknown per person
-     (to avoid flooding the DB with all-rejected rows).
-  6. Save contacts to DB.
-  7. Mark business as enriched.
+  4. Save all candidates to DB with smtp_status='unknown'.
+  5. Mark business as enriched.
+
+Email verification is handled separately by verify_contacts.py,
+which uses mails.so with domain caching and resume support.
 
 Run this directly:
     venv/Scripts/python.exe -m enricher.enricher
@@ -23,6 +23,7 @@ from utils.logger import get_logger
 from db.database import (
     get_unenriched_businesses,
     mark_business_enriched,
+    mark_ssl_issue,
     save_contacts,
 )
 from enricher.team_scraper import scrape_team_page, LOAD_FAILED
@@ -38,49 +39,12 @@ def _extract_domain(website_url: str) -> str:
     return domain.lstrip("www.").lower()
 
 
-def _best_candidates(verified_candidates: list[dict]) -> list[dict]:
-    """
-    From the full verified candidate list, keep the most useful rows:
-      - All 'verified' rows (confirmed to exist).
-      - All 'catch_all' rows (can't confirm but worth keeping).
-      - For 'unknown'/'error': keep at most one per person as a fallback,
-        only if they have no verified/catch_all address.
-
-    This prevents cluttering the DB with dozens of rejected addresses.
-    """
-    # Group by person_name
-    by_person: dict[str, list[dict]] = {}
-    for c in verified_candidates:
-        key = c["person_name"].lower()
-        by_person.setdefault(key, []).append(c)
-
-    kept = []
-    for person_name, group in by_person.items():
-        verified   = [c for c in group if c["smtp_status"] == "verified"]
-        catch_all  = [c for c in group if c["smtp_status"] == "catch_all"]
-        unverified = [c for c in group if c["smtp_status"] == "unverified"]
-        unknown    = [c for c in group if c["smtp_status"] == "unknown"]
-
-        if verified:
-            kept.extend(verified)
-        elif catch_all:
-            kept.extend(catch_all)
-        elif unverified:
-            kept.extend(unverified)  # port 25 blocked — keep all candidates
-        elif unknown:
-            kept.append(unknown[0])
-        # 'rejected' and 'error' rows are intentionally dropped
-
-    return kept
-
-
 def enrich_businesses(limit: int = 10) -> dict:
     """
     Runs the enrichment pipeline on up to `limit` unenriched businesses.
 
     Returns a summary dict:
-      businesses_processed, people_found, candidates_generated,
-      verified, catch_all, saved
+      businesses_processed, people_found, candidates_generated, saved
     """
     businesses = get_unenriched_businesses(limit=limit, country="Nigeria")
     logger.info("[ENRICH] Starting enrichment for %d businesses", len(businesses))
@@ -93,9 +57,9 @@ def enrich_businesses(limit: int = 10) -> dict:
     }
 
     for biz in businesses:
-        place_id     = biz["place_id"]
-        biz_name     = biz["business_name"]
-        website_url  = biz["website_url"]
+        place_id       = biz["place_id"]
+        biz_name       = biz["business_name"]
+        website_url    = biz["website_url"]
         existing_email = biz["email"]
 
         logger.info("[ENRICH] Processing: %s (%s)", biz_name, website_url)
@@ -103,13 +67,17 @@ def enrich_businesses(limit: int = 10) -> dict:
         # Step 1 — scrape team page
         result = scrape_team_page(website_url)
 
-        # If the homepage didn't load at all, skip without marking enriched
-        # so the business can be retried on the next run
+        # If the homepage didn't load at all, permanently skip it.
         if result is LOAD_FAILED:
-            logger.info("[ENRICH] Load failed for %s — will retry next run", biz_name)
+            logger.info("[ENRICH] Load failed for %s — permanently skipping", biz_name)
+            mark_business_enriched(place_id)
             continue
 
-        people, gemini_emails = result
+        people, gemini_emails, ssl_issue = result
+
+        if ssl_issue:
+            mark_ssl_issue(place_id)
+            logger.info("[ENRICH] SSL issue flagged for %s", biz_name)
 
         summary["people_found"] += len(people)
 
@@ -131,18 +99,22 @@ def enrich_businesses(limit: int = 10) -> dict:
         # Step 3 — filter out noise: titles longer than 80 chars are paragraphs not roles
         candidates = [c for c in candidates if len(c.get("title", "")) <= 80]
 
-        to_save = candidates
-
-        # Attach business metadata to each contact row
+        # Step 4 — attach business metadata and save with smtp_status='unknown'
+        # Verification is handled separately by verify_contacts.py
         domain = _extract_domain(website_url)
-        for c in to_save:
-            c["place_id"]      = place_id
-            c["business_name"] = biz_name
-            c["domain"]        = domain
-
-        # Set status for all saved candidates
-        for c in to_save:
-            c["smtp_status"] = "unverified"
+        to_save = []
+        for c in candidates:
+            to_save.append({
+                "place_id":        place_id,
+                "business_name":   biz_name,
+                "domain":          domain,
+                "person_name":     c["person_name"],
+                "title":           c.get("title", ""),
+                "candidate_email": c["candidate_email"],
+                "pattern_used":    c.get("pattern_used", ""),
+                "smtp_status":     "unknown",
+                "source_page_url": c.get("source_page_url", ""),
+            })
 
         # Step 5 — persist
         saved = save_contacts(to_save)

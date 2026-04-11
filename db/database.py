@@ -112,9 +112,25 @@ def init_db() -> None:
                 UNIQUE (person_name, place_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS verification_results (
+                email       TEXT PRIMARY KEY,
+                status      TEXT,
+                verified_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         # Migrate existing campaigns table
         try:
             conn.execute("ALTER TABLE campaigns ADD COLUMN opened_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # Migrate businesses table — track consecutive load failures
+        try:
+            conn.execute("ALTER TABLE businesses ADD COLUMN enrich_fail_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            conn.execute("ALTER TABLE businesses ADD COLUMN ssl_issue INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # column already exists
         conn.commit()
@@ -560,6 +576,27 @@ def get_enrichment_status(limit: int = 100) -> list[dict]:
     ]
 
 
+def get_unenriched_count(country: str = "Nigeria") -> int:
+    """Returns the count of businesses with a website that haven't been enriched yet."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        params: list = []
+        country_clause = ""
+        if country and country != "All":
+            country_clause = "AND country = ?"
+            params.append(country)
+        count = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM businesses
+            WHERE website_url IS NOT NULL AND website_url != ''
+              AND enriched_at IS NULL
+              {country_clause}
+            """,
+            params,
+        ).fetchone()[0]
+    return count
+
+
 def get_unenriched_businesses(limit: int = 10, country: str = "Nigeria") -> list[dict]:
     """
     Returns businesses that have a website_url but have not yet been enriched
@@ -608,6 +645,36 @@ def mark_business_enriched(place_id: str) -> None:
             (datetime.now().isoformat(), place_id),
         )
         conn.commit()
+
+
+def mark_ssl_issue(place_id: str) -> None:
+    """Flags the business as having an SSL certificate problem on their website."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE businesses SET ssl_issue = 1 WHERE place_id = ?",
+            (place_id,),
+        )
+        conn.commit()
+
+
+def increment_enrich_fail_count(place_id: str) -> int:
+    """
+    Increments the enrich_fail_count for a business and returns the new count.
+    Call this whenever a site fails to load during enrichment.
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE businesses SET enrich_fail_count = COALESCE(enrich_fail_count, 0) + 1 WHERE place_id = ?",
+            (place_id,),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT enrich_fail_count FROM businesses WHERE place_id = ?",
+            (place_id,),
+        ).fetchone()
+    return row[0] if row else 1
 
 
 def save_contacts(contacts: list[dict]) -> int:
@@ -662,6 +729,141 @@ def get_all_contacts() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_unverified_contacts(limit: int = 500) -> list[dict]:
+    """Returns contacts with smtp_status = 'unverified' that haven't been sent to."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT c.*
+            FROM contacts c
+            WHERE c.smtp_status = 'unverified'
+              AND c.candidate_email NOT IN (
+                  SELECT email FROM campaigns WHERE status = 'sent'
+              )
+            ORDER BY c.enriched_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_contacts_to_verify(limit: int = 1000) -> list[dict]:
+    """Returns contacts that need mails.so verification (smtp_status unknown/error/unverified)
+    and have not yet been sent to."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT c.candidate_email, c.person_name, c.title, c.business_name,
+                   c.domain, c.smtp_status
+            FROM contacts c
+            WHERE c.smtp_status IN ('unknown', 'error', 'unverified')
+              AND c.candidate_email NOT IN (
+                  SELECT email FROM campaigns WHERE status = 'sent'
+              )
+            ORDER BY c.enriched_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_persons_for_verification() -> list[dict]:
+    """
+    Returns one row per unique (person_name, domain) pair across all contacts,
+    joined with the business email and website_url for pattern inference.
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                c.person_name,
+                c.domain,
+                c.place_id,
+                MIN(c.title)          AS title,
+                MIN(c.source_page_url) AS source_page_url,
+                MIN(c.business_name)  AS business_name,
+                b.email               AS business_email,
+                b.website_url         AS website_url
+            FROM contacts c
+            LEFT JOIN businesses b ON b.place_id = c.place_id
+            GROUP BY c.person_name, c.domain
+            ORDER BY c.domain, c.person_name
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_contacts_by_person(person_name: str, domain: str) -> list[dict]:
+    """Returns all existing candidate emails for a given person+domain."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT candidate_email, pattern_used, smtp_status
+            FROM contacts
+            WHERE LOWER(person_name) = LOWER(?)
+              AND LOWER(domain)      = LOWER(?)
+            ORDER BY enriched_at ASC
+            """,
+            (person_name, domain),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_verification_results(results: list[dict]) -> None:
+    """
+    Upserts rows into verification_results (email + status).
+    Re-runs overwrite previous results for the same email.
+    Each dict must have: email, status.
+    """
+    init_db()
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        for r in results:
+            conn.execute(
+                """
+                INSERT INTO verification_results (email, status, verified_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET
+                    status      = excluded.status,
+                    verified_at = excluded.verified_at
+                """,
+                (r["email"].lower(), r["status"], now),
+            )
+        conn.commit()
+
+
+def get_verification_results_map() -> dict[str, str]:
+    """Returns a dict of {email: status} for all rows in verification_results."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT email, status FROM verification_results"
+        ).fetchall()
+    return {row[0].lower(): row[1] for row in rows}
+
+
+def update_contact_smtp_status(candidate_email: str, smtp_status: str) -> None:
+    """Updates the smtp_status for a single contact row."""
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE contacts SET smtp_status = ? WHERE candidate_email = ?",
+            (smtp_status, candidate_email.lower()),
+        )
+        conn.commit()
+
+
 def get_contact_stats() -> dict:
     """Summary counts for the Decision Makers tab."""
     init_db()
@@ -682,6 +884,120 @@ def get_contact_stats() -> dict:
         "catch_all":            catch_all,
         "businesses_enriched":  businesses_enriched,
     }
+
+
+def get_verification_stats() -> dict:
+    """Summary counts from the verification_results table."""
+    init_db()
+    from datetime import date
+    today = date.today().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        total     = conn.execute("SELECT COUNT(*) FROM verification_results").fetchone()[0]
+        verified  = conn.execute("SELECT COUNT(*) FROM verification_results WHERE status='verified'").fetchone()[0]
+        catch_all = conn.execute("SELECT COUNT(*) FROM verification_results WHERE status='catch_all'").fetchone()[0]
+        rejected  = conn.execute("SELECT COUNT(*) FROM verification_results WHERE status='rejected'").fetchone()[0]
+        not_emailed = conn.execute("""
+            SELECT COUNT(*) FROM verification_results
+            WHERE status IN ('verified','catch_all')
+              AND email NOT IN (SELECT email FROM campaigns WHERE status='sent')
+        """).fetchone()[0]
+        sent_today = conn.execute(
+            "SELECT COUNT(*) FROM campaigns WHERE status='sent' AND sent_at LIKE ?",
+            (f"{today}%",),
+        ).fetchone()[0]
+        sent_total = conn.execute(
+            "SELECT COUNT(DISTINCT email) FROM campaigns WHERE status='sent'"
+        ).fetchone()[0]
+        pending_verification = conn.execute("""
+            SELECT COUNT(*) FROM contacts
+            WHERE LOWER(candidate_email) NOT IN (SELECT email FROM verification_results)
+        """).fetchone()[0]
+        new_persons_to_verify = conn.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT person_name, LOWER(domain) AS ldomain
+                FROM contacts
+                WHERE LOWER(domain) NOT IN (
+                    SELECT DISTINCT LOWER(SUBSTR(email, INSTR(email, '@')+1))
+                    FROM verification_results
+                    WHERE email LIKE '%@%'
+                )
+            )
+        """).fetchone()[0]
+    return {
+        "total":                total,
+        "verified":             verified,
+        "catch_all":            catch_all,
+        "rejected":             rejected,
+        "not_emailed":          not_emailed,
+        "sent_today":           sent_today,
+        "sent_total":           sent_total,
+        "pending_verification": pending_verification,
+        "new_persons_to_verify": new_persons_to_verify,
+    }
+
+
+def get_sendable_contacts() -> list[dict]:
+    """
+    Returns verified + catch_all contacts from verification_results not yet emailed,
+    joined with contacts for display. Used in the Outreach and Enrich tabs.
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT
+                vr.email,
+                vr.status,
+                vr.verified_at,
+                c.person_name,
+                c.title,
+                c.business_name,
+                c.domain,
+                COALESCE(b.ssl_issue, 0) AS ssl_issue
+            FROM verification_results vr
+            LEFT JOIN contacts c ON LOWER(c.candidate_email) = LOWER(vr.email)
+            LEFT JOIN businesses b ON b.place_id = c.place_id
+            WHERE vr.status IN ('verified','catch_all')
+              AND vr.email NOT IN (SELECT email FROM campaigns WHERE status='sent')
+            ORDER BY vr.status, c.business_name, c.person_name
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_verified_contacts_without_drafts(limit: int = 50) -> list[dict]:
+    """
+    Returns sendable contacts (verified/catch_all) that don't yet have a draft,
+    joined with website_url for Gemini context. Used for draft generation.
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT
+                c.place_id,
+                c.business_name,
+                b.website_url,
+                c.person_name,
+                c.title,
+                GROUP_CONCAT(vr.email, ',') AS candidate_emails
+            FROM verification_results vr
+            LEFT JOIN contacts c  ON LOWER(c.candidate_email) = LOWER(vr.email)
+            LEFT JOIN businesses b ON b.place_id = c.place_id
+            WHERE vr.status = 'verified'
+              AND (c.person_name || '|' || COALESCE(c.place_id,'')) NOT IN (
+                  SELECT person_name || '|' || COALESCE(place_id,'') FROM drafts
+              )
+            GROUP BY c.person_name, c.place_id
+            ORDER BY c.business_name, c.person_name
+            LIMIT ?
+        """, (limit,)).fetchall()
+    result = []
+    for r in rows:
+        row = dict(r)
+        row["candidate_emails"] = row["candidate_emails"].split(",") if row["candidate_emails"] else []
+        result.append(row)
+    return result
+
 
 
 def get_campaign_stats() -> dict:

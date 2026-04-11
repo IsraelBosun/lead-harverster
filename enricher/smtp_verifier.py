@@ -1,165 +1,213 @@
 """
 enricher/smtp_verifier.py
 
-Verifies whether an email address exists by performing an SMTP RCPT TO probe.
-No email is ever sent — the connection is closed after the RCPT TO response.
+Verifies email addresses using the mails.so API.
+Replaces the direct SMTP RCPT TO probe which requires port 25 (blocked on most
+corporate networks).
 
-Process:
-  1. DNS MX lookup to find the mail server for the domain.
-  2. Catch-all detection: probe a random impossible address first.
-     If the server accepts it, ALL addresses will appear valid — we mark
-     every address as 'catch_all' and stop probing.
-  3. For each candidate, connect and issue RCPT TO. Read the response code:
-       250 => 'verified'   (mailbox confirmed to exist)
-       550/551/553 => 'rejected' (mailbox does not exist)
-       anything else => 'unknown' (greylisted, rate-limited, etc.)
+API: GET https://api.mails.so/v1/validate?email={email}
+Header: x-mails-api-key: {MAILS_SO_API_KEY}
 
 smtp_status values stored in DB:
-  'verified'  — server confirmed mailbox exists
-  'rejected'  — server confirmed mailbox does NOT exist
-  'catch_all' — server accepts all addresses (cannot distinguish)
-  'unknown'   — connection failed, timeout, or ambiguous response
-  'error'     — DNS/network error
+  'verified'  — mails.so confirmed mailbox is deliverable
+  'rejected'  — mails.so confirmed mailbox does not exist
+  'catch_all' — domain accepts all addresses (cannot distinguish)
+  'unverified'— API key not set, or API quota exceeded
+  'error'     — network/timeout error calling the API
 """
 
-import smtplib
-import socket
-import random
-import string
+import os
+import time
+
+import httpx
 
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SMTP_TIMEOUT   = 10   # seconds per connection attempt
-PROBE_FROM     = "probe@leadharvest.invalid"   # sender used in MAIL FROM
-PROBE_HELO     = "leadharvest.invalid"
+API_URL     = "https://api.mails.so/v1/validate"
+API_TIMEOUT = 10   # seconds per request
+# Small delay between calls to avoid hammering the API
+CALL_DELAY  = 0.2  # seconds
 
 
-def _get_mx(domain: str) -> str | None:
-    """Returns the highest-priority MX hostname for the domain, or None."""
+def _map_status(data: dict) -> str:
+    """
+    Maps the mails.so response to our internal smtp_status values.
+
+    mails.so returns a top-level 'result' field with values such as:
+      deliverable, undeliverable, catch_all, risky, unknown
+    It may also return a nested 'data.result' depending on API version.
+    """
+    # Handle both flat and nested response shapes
+    result = (
+        data.get("result")
+        or (data.get("data") or {}).get("result")
+        or ""
+    ).lower()
+
+    if result == "deliverable":
+        return "verified"
+    if result in ("undeliverable", "invalid"):
+        return "rejected"
+    if result == "catch_all":
+        return "catch_all"
+    if result == "risky":
+        # Risky means it might exist but is a disposable/spam-trap address.
+        # Treat as catch_all — worth keeping but lower confidence.
+        return "catch_all"
+    return "unknown"
+
+
+def _verify_one(email: str, api_key: str) -> str:
+    """Calls the mails.so API for a single address. Returns smtp_status string."""
     try:
-        import dns.resolver
-        records = dns.resolver.resolve(domain, "MX", lifetime=8)
-        sorted_records = sorted(records, key=lambda r: r.preference)
-        return str(sorted_records[0].exchange).rstrip(".")
+        resp = httpx.get(
+            API_URL,
+            params={"email": email},
+            headers={"x-mails-api-key": api_key},
+            timeout=API_TIMEOUT,
+        )
+        if resp.status_code == 402:
+            logger.warning("[MAILSSO] Quota exceeded — marking remaining as unverified")
+            return "quota_exceeded"
+        if resp.status_code != 200:
+            logger.warning("[MAILSSO] Unexpected status %d for %s", resp.status_code, email)
+            return "error"
+
+        data = resp.json()
+        status = _map_status(data)
+        logger.info("[MAILSSO] %s => %s (raw: %s)", email, status, data)
+        return status
+
+    except httpx.TimeoutException:
+        logger.warning("[MAILSSO] Timeout for %s", email)
+        return "error"
     except Exception as exc:
-        logger.debug("[SMTP] MX lookup failed for %s: %s", domain, exc)
-        return None
-
-
-def _smtp_probe(mx_host: str, domain: str, address: str) -> str:
-    """
-    Opens one SMTP connection and probes a single address.
-    Returns 'verified', 'rejected', or 'unknown'.
-    """
-    try:
-        with smtplib.SMTP(timeout=SMTP_TIMEOUT) as smtp:
-            smtp.connect(mx_host, 25)
-            smtp.ehlo(PROBE_HELO)
-            smtp.mail(PROBE_FROM)
-            code, _ = smtp.rcpt(address)
-            smtp.quit()
-
-            if code == 250:
-                return "verified"
-            elif code in (550, 551, 552, 553, 554):
-                return "rejected"
-            else:
-                return "unknown"
-
-    except smtplib.SMTPConnectError:
-        logger.debug("[SMTP] Connect error to %s", mx_host)
-        return "unknown"
-    except smtplib.SMTPServerDisconnected:
-        logger.debug("[SMTP] Server disconnected for %s", mx_host)
-        return "unknown"
-    except socket.timeout:
-        logger.debug("[SMTP] Timeout connecting to %s", mx_host)
-        return "unknown"
-    except OSError as exc:
-        logger.debug("[SMTP] OS error for %s: %s", mx_host, exc)
-        return "unknown"
-    except Exception as exc:
-        logger.debug("[SMTP] Unexpected error for %s: %s", mx_host, exc)
-        return "unknown"
-
-
-def _is_catch_all(mx_host: str, domain: str) -> bool:
-    """
-    Probes a randomly generated impossible address on the domain.
-    If the server accepts it, the domain is a catch-all.
-    """
-    rand_prefix = "zz" + "".join(random.choices(string.ascii_lowercase, k=10))
-    test_addr = f"{rand_prefix}@{domain}"
-    result = _smtp_probe(mx_host, domain, test_addr)
-    return result == "verified"
-
-
-def _port25_available() -> bool:
-    """Quick check: can we reach port 25 at all? Returns False on corporate networks that block it."""
-    try:
-        s = socket.create_connection(("gmail-smtp-in.l.google.com", 25), timeout=5)
-        s.close()
-        return True
-    except Exception:
-        return False
+        logger.warning("[MAILSSO] Error for %s: %s", email, exc)
+        return "error"
 
 
 def verify_candidates(candidates: list[dict]) -> list[dict]:
     """
-    Verifies a list of candidate email dicts in-place (adds 'smtp_status').
+    Verifies a list of candidate email dicts using the mails.so API.
+    Adds 'smtp_status' to each dict in-place.
 
-    Groups candidates by domain to reuse MX lookups and catch-all checks.
-    Each dict must have 'candidate_email'. Returns the same list with
-    'smtp_status' filled in on each entry.
+    Catch-all optimisation: once any candidate on a domain returns catch_all,
+    all remaining candidates on that domain are stamped catch_all without
+    making further API calls — saving credits.
 
-    Args:
-        candidates: List of dicts with at least 'candidate_email'.
-
-    Returns:
-        Same list with 'smtp_status' set on each entry.
+    Each dict must have 'candidate_email'.
+    Returns the same list with smtp_status filled in.
     """
-    # If port 25 is blocked (common on corporate networks), skip all probing
-    # and mark every candidate as 'unverified' so they still get saved to DB.
-    if not _port25_available():
-        logger.warning("[SMTP] Port 25 blocked — skipping verification, saving as unverified")
+    api_key = os.getenv("MAILS_SO_API_KEY", "")
+    if not api_key:
+        logger.warning("[MAILSSO] MAILS_SO_API_KEY not set — marking all as unverified")
         for c in candidates:
             c["smtp_status"] = "unverified"
         return candidates
 
-    # Group by domain
-    by_domain: dict[str, list[dict]] = {}
+    quota_exceeded = False
+    catch_all_domains: set[str] = set()
+    no_connect_domains: set[str] = set()
+
     for c in candidates:
         email = c.get("candidate_email", "")
-        if "@" not in email:
+        if not email or "@" not in email:
             c["smtp_status"] = "error"
             continue
+
         domain = email.split("@")[1].lower()
-        by_domain.setdefault(domain, []).append(c)
 
-    for domain, group in by_domain.items():
-        logger.info("[SMTP] Probing domain %s (%d candidates)", domain, len(group))
-
-        mx = _get_mx(domain)
-        if not mx:
-            logger.warning("[SMTP] No MX record for %s — marking all as error", domain)
-            for c in group:
-                c["smtp_status"] = "error"
+        # Skip — domain already confirmed as catch-all
+        if domain in catch_all_domains:
+            c["smtp_status"] = "catch_all"
+            logger.debug("[MAILSSO] %s skipped — domain is catch-all", email)
             continue
 
-        # Catch-all detection first
-        if _is_catch_all(mx, domain):
-            logger.info("[SMTP] %s is a catch-all domain", domain)
-            for c in group:
-                c["smtp_status"] = "catch_all"
+        # Skip — domain server unreachable, no point retrying
+        if domain in no_connect_domains:
+            c["smtp_status"] = "unknown"
+            logger.debug("[MAILSSO] %s skipped — domain server unreachable", email)
             continue
 
-        # Individual probes
-        for c in group:
-            address = c["candidate_email"]
-            status = _smtp_probe(mx, domain, address)
-            c["smtp_status"] = status
-            logger.info("[SMTP] %s => %s", address, status)
+        if quota_exceeded:
+            c["smtp_status"] = "unverified"
+            continue
+
+        status = _verify_one(email, api_key)
+
+        if status == "quota_exceeded":
+            quota_exceeded = True
+            c["smtp_status"] = "unverified"
+            continue
+
+        if status == "catch_all":
+            catch_all_domains.add(domain)
+            logger.info("[MAILSSO] %s is catch-all — skipping remaining on this domain", domain)
+
+        # First unknown on a domain (no_connect or timeout) means the mail
+        # server is unreachable — no point probing further candidates on it.
+        if status == "unknown" and domain not in no_connect_domains:
+            no_connect_domains.add(domain)
+            logger.info("[MAILSSO] %s unreachable — skipping remaining on this domain", domain)
+
+        c["smtp_status"] = status
+        time.sleep(CALL_DELAY)
+
+    return candidates
+
+
+def reverify_contacts(limit: int = 500) -> dict:
+    """
+    Re-verifies existing contacts in the DB that have smtp_status='unverified'
+    and haven't been sent to yet. Updates their status in-place.
+
+    Returns a summary dict: total, verified, rejected, catch_all, errors.
+    """
+    from db.database import get_unverified_contacts, update_contact_smtp_status
+
+    api_key = os.getenv("MAILS_SO_API_KEY", "")
+    if not api_key:
+        logger.warning("[MAILSSO] MAILS_SO_API_KEY not set — cannot reverify")
+        return {"total": 0, "verified": 0, "rejected": 0, "catch_all": 0, "errors": 0}
+
+    contacts = get_unverified_contacts(limit=limit)
+    logger.info("[MAILSSO] Re-verifying %d unverified contacts", len(contacts))
+
+    summary = {"total": len(contacts), "verified": 0, "rejected": 0, "catch_all": 0, "errors": 0}
+    quota_exceeded = False
+
+    for c in contacts:
+        email = c.get("candidate_email", "")
+        if not email or "@" not in email:
+            summary["errors"] += 1
+            continue
+
+        if quota_exceeded:
+            break
+
+        status = _verify_one(email, api_key)
+
+        if status == "quota_exceeded":
+            quota_exceeded = True
+            logger.warning("[MAILSSO] Quota exceeded — stopping early")
+            break
+
+        update_contact_smtp_status(email, status)
+
+        if status == "verified":
+            summary["verified"] += 1
+        elif status == "rejected":
+            summary["rejected"] += 1
+        elif status == "catch_all":
+            summary["catch_all"] += 1
+        else:
+            summary["errors"] += 1
+
+        time.sleep(CALL_DELAY)
+
+    logger.info("[MAILSSO] Reverify complete: %s", summary)
+    return summary
 
     return candidates
