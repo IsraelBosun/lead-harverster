@@ -962,6 +962,36 @@ with tab_outreach:
 
     st.divider()
 
+    # ── Verified Contacts Table ───────────────────────────────────────────────
+
+    verified_sendable = [c for c in get_sendable_contacts() if c["status"] == "verified"]
+    st.markdown(
+        f'<p class="lh-section-title">'
+        f'Verified Contacts <span style="font-weight:400;color:#9ca3af;">'
+        f'{len(verified_sendable)} contacts</span></p>',
+        unsafe_allow_html=True,
+    )
+
+    if not verified_sendable:
+        st.info("No verified contacts yet. Run enrichment and verification in the Enrich tab.")
+    else:
+        import pandas as pd
+        sent_map_out = set(get_campaign_status_map().keys())
+        df_verified = pd.DataFrame(verified_sendable)[["email", "person_name", "title", "business_name", "domain", "ssl_issue"]]
+        df_verified.columns = ["Email", "Name", "Title", "Business", "Domain", "ssl_issue"]
+        df_verified["Sent"] = df_verified["Email"].str.lower().apply(lambda e: "Yes" if e in sent_map_out else "No")
+        df_verified["SSL Issue"] = df_verified["ssl_issue"].apply(lambda x: "Yes" if x else "")
+        df_verified = df_verified.drop(columns="ssl_issue")
+        df_verified.insert(0, "#", df_verified.index + 1)
+        st.dataframe(
+            df_verified,
+            width='stretch',
+            hide_index=True,
+            column_config={"#": st.column_config.NumberColumn("#", width="small")},
+        )
+
+    st.divider()
+
     # ── Test Delivery ─────────────────────────────────────────────────────────
 
     st.markdown("**Test Delivery**")
@@ -979,12 +1009,30 @@ with tab_outreach:
         if not test_addr.strip() or "@" not in test_addr:
             st.warning("Enter a valid email address.")
         else:
-            from emailer.templates import render as render_template
-            subject, body = render_template("Blue Hydra Labs")
+            from enricher.gemini_extractor import draft_email_with_gemini
+            sample_page = (
+                "Okafor & Associates is a full-service Nigerian law firm based in Lagos. "
+                "We specialise in corporate law, mergers and acquisitions, litigation, and real estate. "
+                "Our team of senior partners has over 20 years of combined experience advising "
+                "multinationals and high-net-worth individuals across West Africa. "
+                "We handle client matters manually through email and phone, and have no online client portal."
+            )
+            with st.spinner("Composing test email with Gemini..."):
+                draft = draft_email_with_gemini(
+                    person_name="Chidi Okafor",
+                    title="Managing Partner",
+                    business_name="Okafor & Associates",
+                    page_text=sample_page,
+                )
+            if draft:
+                subject, body = draft["subject"], draft["body"]
+            else:
+                from emailer.templates import render as render_template
+                subject, body = render_template("Okafor & Associates")
+
             with st.spinner("Sending test..."):
                 ok, reason = send_email(test_addr.strip(), subject, body)
             if ok:
-                save_campaign_send(test_addr.strip(), "Blue Hydra Labs", "sent")
                 st.success(f"Test sent to {test_addr}. Check your inbox.")
             else:
                 st.error(f"Send failed: {reason}")
