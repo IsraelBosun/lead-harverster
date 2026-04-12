@@ -78,6 +78,7 @@ email. Called once per recipient by the Streamlit campaign tab.
 """
 
 import os
+import re
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -96,6 +97,36 @@ SMTP_USER         = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD     = os.getenv("SMTP_PASSWORD", "")
 SENDER_NAME       = os.getenv("SENDER_NAME", "Bosun")
 TRACKING_BASE_URL = os.getenv("TRACKING_BASE_URL", "")
+
+
+def _to_html(body: str) -> str:
+    """
+    Converts a plain-text email body to HTML.
+    - Escapes HTML special characters
+    - Makes the WhatsApp wa.me link clickable with a clean phone number display
+    - Makes bluehydralabs.com clickable
+    - Converts newlines to <br>
+    """
+    text = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # WhatsApp link — show phone number as display text
+    text = text.replace(
+        "https://wa.me/2349133105749",
+        '<a href="https://wa.me/2349133105749" style="color:#25D366">+234 913 310 5749</a>',
+    )
+    # Website link
+    text = re.sub(
+        r'(?<!["\'/])bluehydralabs\.com',
+        '<a href="https://bluehydralabs.com" style="color:#4F46E5">bluehydralabs.com</a>',
+        text,
+    )
+    text = text.replace("\n", "<br>\n")
+    return (
+        "<html><body>"
+        "<p style='font-family:Arial,sans-serif;font-size:14px;line-height:1.8;"
+        "color:#111;max-width:600px'>"
+        f"{text}"
+        "</p></body></html>"
+    )
 
 
 def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
@@ -124,20 +155,19 @@ def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
     mime["To"]      = to_address
     mime["Subject"] = subject
 
-    # Plain text part (always included)
+    # Plain text part (fallback for clients that don't render HTML)
     mime.attach(MIMEText(body, "plain", "utf-8"))
 
-    # HTML part with tracking pixel (if tracking URL is configured)
+    # HTML part — always sent so links are clickable
+    html_body = _to_html(body)
     if TRACKING_BASE_URL:
         encoded_email = quote(to_address, safe="")
         pixel_url = f"{TRACKING_BASE_URL}/track/open/{encoded_email}"
-        html_body = (
-            "<html><body>"
-            f"<pre style='font-family:Arial,sans-serif;font-size:14px;white-space:pre-wrap'>{body}</pre>"
-            f"<img src='{pixel_url}' width='1' height='1' style='display:none' alt=''/>"
-            "</body></html>"
+        html_body = html_body.replace(
+            "</body></html>",
+            f"<img src='{pixel_url}' width='1' height='1' style='display:none' alt=''/></body></html>",
         )
-        mime.attach(MIMEText(html_body, "html", "utf-8"))
+    mime.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
         server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)

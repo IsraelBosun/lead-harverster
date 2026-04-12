@@ -27,12 +27,12 @@ Based on the website content below, write a short professional cold email that d
 2. References something SPECIFIC you noticed on their website — a service they offer, a case they handle, a client they mention, something real. This is the most important line — it must feel personal, not generic.
 3. Includes this exact sentence: "I run Blue Hydra Labs, where we build custom software and AI tools for teams like yours."
 4. Mentions ONE specific thing we could build or improve for them based on what you see on their site (e.g. online booking, client portal, AI document automation, CRM, mobile app, website modernisation etc.)
-5. Ends with a simple low-pressure CTA — just ask them to reply to this email if they are interested or would like to know more
+5. Ends with this exact CTA line: "If this is relevant to you, simply reply or reach me directly on WhatsApp: https://wa.me/2349133105749"
 6. Closes with exactly:
 Yours sincerely,
 Bosun
-CEO
-Blue Hydra Labs
+CEO, Blue Hydra Labs
+bluehydralabs.com
 
 Tone: professional but warm, not salesy. Keep the body concise — 4 to 5 sentences before the sign-off.
 Structure the body with a blank line between every paragraph so it reads easily on mobile. No wall of text.
