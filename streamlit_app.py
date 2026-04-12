@@ -1079,6 +1079,8 @@ with tab_outreach:
                 f"{draft['person_name']} — {draft['title']} | {draft['business_name']}"
             ):
                 st.markdown(f"**To:** {', '.join(candidate_emails) or 'No email'}")
+                if draft.get("website_url"):
+                    st.markdown(f"**Website:** [{draft['website_url']}]({draft['website_url']})")
                 edited_subject = st.text_input(
                     "Subject", value=draft["subject"], key=f"subj_{draft['id']}"
                 )
