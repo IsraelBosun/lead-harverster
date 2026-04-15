@@ -51,7 +51,27 @@ from utils.timezone_utils import (
 
 API_BASE = "http://127.0.0.1:8000"
 # API_BASE = "https://lead-harverster-api.onrender.com"
+RENDER_EMAIL_URL = "https://lead-harverster-api.onrender.com"
 POLL_INTERVAL_SECONDS = 3
+
+
+def _send_email_via_render(to_address: str, subject: str, body: str) -> tuple[bool, str]:
+    """
+    Proxies the email send through the Render API so outgoing SMTP headers
+    show Render's hostname instead of this machine's.
+    """
+    try:
+        resp = httpx.post(
+            f"{RENDER_EMAIL_URL}/send-email",
+            json={"to_address": to_address, "subject": subject, "body": body},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return True, ""
+        data = resp.json()
+        return False, data.get("reason", f"HTTP {resp.status_code}")
+    except Exception as exc:
+        return False, str(exc)
 
 
 # ── Page config (must be first Streamlit call) ─────────────────────────────────
@@ -1031,7 +1051,7 @@ with tab_outreach:
                 subject, body = render_template("Okafor & Associates")
 
             with st.spinner("Sending test..."):
-                ok, reason = send_email(test_addr.strip(), subject, body)
+                ok, reason = _send_email_via_render(test_addr.strip(), subject, body)
             if ok:
                 st.success(f"Test sent to {test_addr}. Check your inbox.")
             else:
@@ -1105,7 +1125,7 @@ with tab_outreach:
                     for email in (draft.get("candidate_emails") or []):
                         if email.lower() in sent_emails:
                             continue
-                        ok, _ = send_email(email, draft["subject"], draft["body"])
+                        ok, _ = _send_email_via_render(email, draft["subject"], draft["body"])
                         if ok:
                             save_campaign_send(email, draft["business_name"], "sent")
                             sent_emails.add(email.lower())
@@ -1143,7 +1163,7 @@ with tab_outreach:
                         for email in candidate_emails:
                             if email.lower() in sent_emails:
                                 continue
-                            ok, msg = send_email(email, edited_subject, edited_body)
+                            ok, msg = _send_email_via_render(email, edited_subject, edited_body)
                             if ok:
                                 save_campaign_send(email, draft["business_name"], "sent")
                                 sent_emails.add(email.lower())

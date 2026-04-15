@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from db.database import filter_new_businesses, get_existing_website_urls, save_businesses
+from emailer.sender import send_email
 from main import export_to_excel, update_master_excel
 from models.business import Business
 from scraper.places import CATEGORY_MAP, search_businesses
@@ -57,6 +58,13 @@ class ScrapeRequest(BaseModel):
     category: str
     city: str
     country: str = "Nigeria"
+
+
+class SendEmailRequest(BaseModel):
+    """Request body for POST /send-email."""
+    to_address: str
+    subject: str
+    body: str
 
 
 # ── In-memory job store ────────────────────────────────────────────────────────
@@ -393,3 +401,21 @@ async def track_open(lead_id: str):
     logger.info("Email opened by %s", email)
 
     return Response(content=_PIXEL, media_type="image/gif")
+
+
+# ── Email send proxy ───────────────────────────────────────────────────────────
+
+@app.post("/send-email")
+async def proxy_send_email(payload: SendEmailRequest):
+    """
+    Sends a single email via SMTP from Render's server.
+    Accepts the recipient, subject, and plain-text body; returns ok/reason.
+    The laptop calls this instead of hitting SMTP directly, so the
+    outgoing Received headers show Render's hostname, not the laptop's.
+    """
+    ok, reason = await asyncio.to_thread(
+        send_email, payload.to_address, payload.subject, payload.body
+    )
+    if ok:
+        return {"ok": True}
+    return JSONResponse(status_code=502, content={"ok": False, "reason": reason})
