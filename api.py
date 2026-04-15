@@ -403,6 +403,68 @@ async def track_open(lead_id: str):
     return Response(content=_PIXEL, media_type="image/gif")
 
 
+# ── SMTP diagnostics ──────────────────────────────────────────────────────────
+
+@app.get("/diagnose-smtp")
+async def diagnose_smtp():
+    """
+    Tests SMTP connectivity from Render's server and reports what it finds.
+    Helps identify whether env vars are loaded and which ports are reachable.
+    """
+    import socket
+    import smtplib
+
+    host     = os.getenv("SMTP_HOST", "")
+    port_587 = 587
+    port_465 = 465
+    user     = os.getenv("SMTP_USER", "")
+    password = os.getenv("SMTP_PASSWORD", "")
+
+    result = {
+        "env": {
+            "SMTP_HOST":     host or "[NOT SET]",
+            "SMTP_PORT":     os.getenv("SMTP_PORT", "[NOT SET]"),
+            "SMTP_USER":     user or "[NOT SET]",
+            "SMTP_PASSWORD": "SET" if password else "[NOT SET]",
+            "SENDER_EMAIL":  os.getenv("SENDER_EMAIL", "[NOT SET]"),
+        },
+        "connectivity": {},
+        "auth": {},
+    }
+
+    # Test raw TCP reachability for both ports
+    for port in [port_587, port_465]:
+        try:
+            sock = socket.create_connection((host, port), timeout=10)
+            sock.close()
+            result["connectivity"][f"port_{port}"] = "reachable"
+        except Exception as exc:
+            result["connectivity"][f"port_{port}"] = f"FAILED: {exc}"
+
+    # Try STARTTLS login on 587 if reachable
+    if "FAILED" not in result["connectivity"].get("port_587", "FAILED"):
+        try:
+            srv = smtplib.SMTP(host, 587, timeout=15)
+            srv.starttls()
+            srv.login(user, password)
+            srv.quit()
+            result["auth"]["port_587_starttls"] = "login OK"
+        except Exception as exc:
+            result["auth"]["port_587_starttls"] = f"FAILED: {exc}"
+
+    # Try SSL login on 465 if reachable
+    if "FAILED" not in result["connectivity"].get("port_465", "FAILED"):
+        try:
+            srv = smtplib.SMTP_SSL(host, 465, timeout=15)
+            srv.login(user, password)
+            srv.quit()
+            result["auth"]["port_465_ssl"] = "login OK"
+        except Exception as exc:
+            result["auth"]["port_465_ssl"] = f"FAILED: {exc}"
+
+    return result
+
+
 # ── Email send proxy ───────────────────────────────────────────────────────────
 
 @app.post("/send-email")
