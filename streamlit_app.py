@@ -64,7 +64,7 @@ def _send_email_via_render(to_address: str, subject: str, body: str) -> tuple[bo
         resp = httpx.post(
             f"{RENDER_EMAIL_URL}/send-email",
             json={"to_address": to_address, "subject": subject, "body": body},
-            timeout=30,
+            timeout=90,
         )
         if resp.status_code == 200:
             return True, ""

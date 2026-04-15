@@ -170,7 +170,11 @@ def send_email(to_address: str, subject: str, body: str) -> tuple[bool, str]:
     mime.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
-        server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=15)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15)
+            server.starttls()
         server.login(SMTP_USER, SMTP_PASSWORD)
         raw = mime.as_bytes()
         server.sendmail(SENDER_EMAIL, [to_address], raw)
